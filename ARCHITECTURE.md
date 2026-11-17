@@ -1,6 +1,6 @@
 # box-multi-tracker: Architecture
 
-Status: implemented. Optional runtime validation (section 5.6) was added after the first implementation; everything else is unchanged by it.
+Status: implemented. Optional runtime validation (section 5.6) and the optional Sentry adapter (section 5.7) were added after the first implementation; neither changes Core's tracking or error handling.
 Scope: Senior Frontend take-home. The goal is a small, clean, well-tested core with a type-safe API, not a production analytics platform.
 
 ## 1. Summary
@@ -18,6 +18,7 @@ Everything else lives outside Core:
 - Provider configuration.
 - Business event names and payload types.
 - Any validation library. Core only knows the `EventValidator` contract; Zod is an optional adapter in its own entry point (`box-multi-tracker/zod`).
+- Any monitoring service. Core only exposes `onError` and `onValidationError`; Sentry is an optional adapter in its own entry point (`box-multi-tracker/sentry`).
 
 **Pattern:** a factory function (`createAnalytics`) that encapsulates per-instance state in a closure and returns a small facade (`AnalyticsInstance`), plus Strategy (`AnalyticsProvider`) with Dependency Injection through the factory configuration. Dispatch is a plain loop. No classes in Core, no event bus, no registry, no singleton, no module-level state.
 
@@ -183,6 +184,11 @@ analytics.isProviderEnabled("mixpanel"); // false
 - Value: `createZodValidator`.
 - Types: `ZodEventSchemas`, `InferInputEvents`, `InferOutputEvents`.
 - Importing this entry point is the only place `zod` is referenced, and only as types.
+
+**Exports from `box-multi-tracker/sentry` (separate entry point, optional)**
+- Value: `createSentryReporter`.
+- Types: `SentryReporter`, `SentryReporterOptions` (only Core types appear in them; no Sentry type is exposed).
+- Importing this entry point is the only place `@sentry/browser` is referenced, and it is a runtime import.
 
 **Improvements over the original conceptual example**
 - The event map is an explicit generic (`createAnalytics<AppEvents>`) because TypeScript cannot reliably infer it from providers.
@@ -364,6 +370,38 @@ const validator = createZodValidator({
 - A rejected event is silent unless `onValidationError` is set, matching `onError`.
 - Each `track` pays for one validator call when a validator is configured, and nothing otherwise.
 
+### 5.7 Sentry adapter (optional)
+
+`box-multi-tracker/sentry` reports failures of the SDK to Sentry. Core is unchanged: the adapter is a pair of handlers for the callbacks that already exist.
+
+```ts
+const sentry = createSentryReporter({ instanceId: "checkout" });
+createAnalytics({ providers, onError: sentry.onProviderError, onValidationError: sentry.onValidationError });
+```
+
+- **Separate entry point.** `exports["./sentry"]`, same package. Nothing in Core imports it; no `@sentry` string appears in Core's source or output. This is checked by searching the Core source and the build output.
+- **Optional peer dependency.** `@sentry/browser` `^11.0.0`, optional in `peerDependenciesMeta`; also a `devDependency` for tests. Importing the subpath without it installed fails at module load (`ERR_MODULE_NOT_FOUND`); Core and the Zod adapter are unaffected.
+- **Never initializes Sentry.** The application calls `Sentry.init`. The reporter only calls `captureException`. No `init`, `flush`, retry, queue or lifecycle.
+- **Functional factory, no state.** `createSentryReporter({ instanceId })` returns two handlers over a closure of one string. No class, no module-level state.
+- **Policy.**
+
+| Source | Reported | Why |
+| --- | --- | --- |
+| Provider throws or rejects (`ProviderError`) | yes | a bug or outage in an integration |
+| Validator throws (`ValidationError` with a `cause` property) | yes | a bug in the validator |
+| Payload fails validation (no `cause` property) | no | expected input, not a defect; still visible through `onValidationError` |
+
+- **Classification by `Object.hasOwn(error, "cause")`.** A validator can throw `undefined`, so `cause !== undefined` would misclassify it. The presence of the property is the signal, and it is set only in Core's catch path.
+- **Tags** `source=box-multi-tracker`, `instance`, `error_type` (`provider_error` or `validator_exception`), `event`, and `provider` for provider errors. A `box_multi_tracker` context carries `thrown_value_was_error` and, for validator exceptions, `issue_count`.
+- **Privacy by construction.** The handlers receive only `ProviderError` and `ValidationError`, which carry no payload. A thrown value that is not an `Error` is replaced by a fixed message, because it can contain payload data. Validation issue text is dropped (only the count is sent): Core builds a failed-validator issue from the thrown value, and Sentry's context depth limit would flatten it anyway.
+- **Isolation.** The handlers never throw: argument destructuring and the Sentry call are inside one `try/catch`. If `captureException` returns something promise-like, a rejection handler is attached so a failing send cannot become an unhandled rejection. Sentry's own failures are swallowed and never reported again.
+
+**Trade-offs.**
+- A provider's own `Error` is sent with its message. Providers and validators must not put payload data in error messages.
+- Sentry's default integrations (console, click and fetch breadcrumbs) can attach logged payloads to events. That is Sentry configuration, outside the adapter; the README and the playground disable them.
+- Validator failures are told apart by the `cause` property, so they depend on Core attaching it for exceptions only (current behavior, covered by tests).
+- Only `@sentry/browser` 11.13 was verified; the `^11.0.0` range is not.
+
 ## 6. Project structure
 
 ```
@@ -375,6 +413,9 @@ box-multi-tracker/
     zod/
       index.ts      # entry point `box-multi-tracker/zod` (re-exports only)
       validator.ts  # createZodValidator: the only file that mentions Zod (type imports only)
+    sentry/
+      index.ts      # entry point `box-multi-tracker/sentry` (re-exports only)
+      reporter.ts   # createSentryReporter: the only file that imports @sentry/browser
   test/
     analytics.test.ts       # runtime behavior
     types.test-d.ts         # compile-time behavior
@@ -382,6 +423,9 @@ box-multi-tracker/
     validation.test-d.ts    # validation typing in Core
     zod.test.ts             # Zod adapter, alone and end to end through createAnalytics
     zod.test-d.ts           # Zod adapter typing and public exports
+    sentry.test.ts          # Sentry adapter against a mocked @sentry/browser
+    sentry.integration.test.ts  # Sentry adapter against the real client with an in-memory transport
+    sentry.test-d.ts        # Sentry adapter typing and public exports
     helpers.ts              # recording / throwing / rejecting test providers
   ARCHITECTURE.md
   README.md             # usage, validation, and a sample custom provider snippet
@@ -391,7 +435,7 @@ box-multi-tracker/
 **Why this small:**
 - `types.ts` and `analytics.ts` separate the contract (what providers and apps import) from behavior.
 - Error isolation is about 15 lines. A separate file or `ErrorHandler` abstraction would be a layer without a reason, so it stays a small stateless helper inside `analytics.ts`.
-- `src/zod/` is the only folder besides the top-level files. It exists because the adapter is a separate public entry point; nothing outside it may import it, and nothing in it is imported by Core.
+- `src/zod/` and `src/sentry/` are the only folders besides the top-level files. Each exists because the adapter is a separate public entry point; nothing outside it may import it, and nothing in it is imported by Core.
 - There is no `utils/`, `core/`, `providers/`, `internal/`, or `testing/` folder.
 - Tooling: TypeScript, Vitest, `tsc` for the build, **ESM-only** output with an `exports` map and `types`.
 - The sample custom provider is a snippet in `README.md`. Test helpers contain their own small providers; there is no `examples/` folder.
@@ -451,6 +495,13 @@ Plus readonly checks: assigning to `event.name`, `event.payload`, or a top-level
 
 **Zod adapter runtime tests (`zod.test.ts`).** Valid payloads; transformations (`"500"` to `500`, trim, default, lowercase); different schemas per event; optional and `undefined` payloads; the plain `{ success, issues }` shape with only `message` and `path`; nested paths and several issues; symbol path conversion; unknown events and inherited names (`toString`, `__proto__`) as failures; schemas are not mutated; and end to end through `createAnalytics` (the transformation example, validation error reporting, an async schema failing closed, two instances with different schemas).
 
+**Sentry adapter tests (`sentry.test.ts`, `sentry.integration.test.ts`, `sentry.test-d.ts`).**
+- Mocked `@sentry/browser` (a plain recorder, so an unobserved rejection stays unhandled and is detected): provider errors (sync and async) reported with exact tags, level and context; per-reporter instance tag; non-`Error` values replaced; validator exceptions reported, including a validator that throws `undefined`; ordinary validation failures not reported; no payload or issue text anywhere in captured arguments; end to end through `createAnalytics`.
+- Isolation: a throwing `captureException`, a rejected promise, a thenable with a throwing `then` getter, a hostile `Proxy` and malformed arguments never escape or cause an unhandled rejection.
+- Integration with the real client (dummy DSN, no default integrations, in-memory transport): the same policy, and a sentinel payload never appears in a serialized envelope. This caught the depth flattening of nested context, which a mock cannot show.
+- Types: required `instanceId`, handler types equal Core's callback types, plug into `AnalyticsConfig`, and `createSentryReporter` is not exported from the Core entry point.
+- Mutation checks were run by hand (classifying by value instead of presence, dropping the try/catch, not observing the rejection, adding the payload to the context).
+
 **Validation type tests (`validation.test-d.ts`, `zod.test-d.ts`).**
 - Input and output types are inferred from the validator (`AnalyticsInstance<Outputs, Inputs>`), and from Zod schemas.
 - `track` accepts input types and rejects output-only values; unknown names and invalid payloads are errors.
@@ -461,6 +512,8 @@ Plus readonly checks: assigning to `event.name`, `event.payload`, or a top-level
 Mutation checks were also run by hand during development (ignoring the transform, dispatching invalid events, routing validation errors to `onError`, letting validator or callback errors escape, reordering the overloads); each is caught by at least two tests.
 
 **Public API type checks.** A file that imports only the built package, compiled under both `NodeNext` and `Bundler` module resolution (`examples/react-playground/type-checks/`), covers the validator contract and the `box-multi-tracker/zod` entry point, including that internals are unreachable.
+
+**Playground.** The React playground initializes Sentry with a dummy DSN and an in-memory transport, runs the four scenarios (provider error, validator exception, ordinary validation failure, personal data in the payload) against the real client, and asserts the same policy and privacy guarantees. Nothing is sent to a Sentry project.
 
 **Explicitly not tested:** package-compatibility matrices, publish checks, and bundle-size budgets.
 
@@ -498,3 +551,4 @@ Duplicate-name validation exists only because name-based control requires unique
 13. **Validation errors are separate:** `onValidationError(ValidationError)`, never `onError`. Both callbacks are isolated from the SDK. A throwing validator fails closed. No payload in `ValidationError`.
 14. **Typing:** two event maps (`T` output, `TInput` input, defaulting to `T`); both inferred from the validator; validator overload first; no `any`, no casts to bypass the type system in Core.
 15. **Zod is an adapter, not a dependency:** `box-multi-tracker/zod` (`createZodValidator`), an optional peer dependency (`zod` `^4.0.0`), type-only import. `dependencies` stays empty.
+16. **Sentry is an adapter, not a dependency of Core:** `box-multi-tracker/sentry` (`createSentryReporter`), an optional peer dependency (`@sentry/browser` `^11.0.0`). It reuses `onError` and `onValidationError`, never initializes Sentry, reports provider errors and validator exceptions only, and never sends payloads.

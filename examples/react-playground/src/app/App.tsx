@@ -1,9 +1,12 @@
 import { EventLog } from "../components/EventLog";
 import { ProviderControls } from "../components/ProviderControls";
+import { SentryCaptures } from "../components/SentryCaptures";
 import { CompleteOrder } from "../features/checkout/complete-order";
 import { Login } from "../features/auth/login";
 import { ProductDetails } from "../features/products/product-details";
+import { SentryDemo } from "../features/monitoring/sentry-demo";
 import { ValidationDemo } from "../features/validation/validation-demo";
+import type { SentryCaptureLog } from "../monitoring/sentry-capture-log";
 import { PlaygroundProvider } from "./providers/PlaygroundProvider";
 import { usePlayground } from "./providers/playground.context";
 
@@ -37,19 +40,21 @@ function Playground() {
           <ProductDetails />
           <CompleteOrder />
           <ValidationDemo />
+          <SentryDemo />
         </div>
 
         <div className="column">
           <EventLog />
+          <SentryCaptures />
         </div>
       </main>
     </div>
   );
 }
 
-export function App() {
+export function App({ sentryLog }: { sentryLog: SentryCaptureLog }) {
   return (
-    <PlaygroundProvider>
+    <PlaygroundProvider sentryLog={sentryLog}>
       <Playground />
     </PlaygroundProvider>
   );

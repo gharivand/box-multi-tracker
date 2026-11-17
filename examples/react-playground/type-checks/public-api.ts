@@ -22,6 +22,8 @@ import type {
   ValidationIssue,
   ValidationResult,
 } from "box-multi-tracker";
+import { createSentryReporter } from "box-multi-tracker/sentry";
+import type { SentryReporter, SentryReporterOptions } from "box-multi-tracker/sentry";
 import { createZodValidator } from "box-multi-tracker/zod";
 import type { InferInputEvents, InferOutputEvents, ZodEventSchemas } from "box-multi-tracker/zod";
 import { z } from "zod";
@@ -274,3 +276,32 @@ createZodValidator({ page_viewed: z.string() });
 // The adapter is an entry point of its own; its internals are not reachable.
 // @ts-expect-error internal modules are not reachable (exports map)
 import type * as InternalZod from "box-multi-tracker/dist/zod/validator.js";
+
+// --- Monitoring: the Sentry adapter (`box-multi-tracker/sentry`) -------------------
+
+export const sentryOptions: SentryReporterOptions = { instanceId: "checkout" };
+export const reporter: SentryReporter = createSentryReporter(sentryOptions);
+
+// Its handlers plug straight into the Core callbacks, with Core's own types.
+export const onProviderError: (error: ProviderError) => void = reporter.onProviderError;
+export const onValidationError: (error: ValidationError) => void = reporter.onValidationError;
+export const withSentry = createAnalytics<Events>({
+  providers: [entry],
+  onError: reporter.onProviderError,
+  onValidationError: reporter.onValidationError,
+});
+
+// @ts-expect-error the instance id is required
+createSentryReporter({});
+// @ts-expect-error no other options exist (the adapter never initializes Sentry)
+createSentryReporter({ instanceId: "a", dsn: "https://example.invalid/1" });
+// @ts-expect-error the handlers are not interchangeable
+export const swapped: (error: ValidationError) => void = reporter.onProviderError;
+
+// Core does not know about Sentry.
+// @ts-expect-error not exported from the Core entry point
+import { createSentryReporter as fromCore } from "box-multi-tracker";
+void fromCore;
+
+// @ts-expect-error internal modules are not reachable (exports map)
+import type * as InternalSentry from "box-multi-tracker/dist/sentry/reporter.js";

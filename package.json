@@ -13,6 +13,10 @@
     "./zod": {
       "types": "./dist/zod/index.d.ts",
       "default": "./dist/zod/index.js"
+    },
+    "./sentry": {
+      "types": "./dist/sentry/index.d.ts",
+      "default": "./dist/sentry/index.js"
     }
   },
   "files": [
@@ -28,14 +32,19 @@
     "clean": "rm -rf dist"
   },
   "peerDependencies": {
+    "@sentry/browser": "^11.0.0",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
+    "@sentry/browser": {
+      "optional": true
+    },
     "zod": {
       "optional": true
     }
   },
   "devDependencies": {
+    "@sentry/browser": "^11.13.0",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0",
     "zod": "^4.6.7"

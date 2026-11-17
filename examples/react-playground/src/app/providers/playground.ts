@@ -2,9 +2,13 @@ import { createAppAnalytics } from "../../analytics/analytics";
 import type { AppAnalytics } from "../../analytics/analytics";
 import { createDispatchLog } from "../../analytics/dispatch-log";
 import type { DispatchLog } from "../../analytics/dispatch-log";
+import type { SentryCaptureLog } from "../../monitoring/sentry-capture-log";
+import { createSentryReporter } from "box-multi-tracker/sentry";
 
 export interface Playground {
   readonly log: DispatchLog;
+  /** What Sentry was asked to send (it is initialized by the application, in `main.tsx`). */
+  readonly sentryLog: SentryCaptureLog;
   /** Two independent analytics instances, each with its own providers and state. */
   readonly instances: readonly AppAnalytics[];
 }
@@ -14,16 +18,19 @@ export interface Playground {
  * visualizes them, and are configured differently on purpose: another provider
  * order, and a provider that starts disabled.
  */
-export function createPlayground(): Playground {
+export function createPlayground(sentryLog: SentryCaptureLog): Playground {
   const log = createDispatchLog();
 
   return {
     log,
+    sentryLog,
     instances: [
       createAppAnalytics({
         instanceId: "a",
         label: "Instance A",
         log,
+        // One reporter per instance, so Sentry events carry the right `instance` tag.
+        monitoring: createSentryReporter({ instanceId: "a" }),
         providers: [
           { kind: "console", enabled: true },
           { kind: "flaky-service", enabled: true },
@@ -34,6 +41,7 @@ export function createPlayground(): Playground {
         instanceId: "b",
         label: "Instance B",
         log,
+        monitoring: createSentryReporter({ instanceId: "b" }),
         providers: [
           { kind: "mock-analytics", enabled: true },
           { kind: "console", enabled: false },

@@ -1,5 +1,11 @@
 import { createAnalytics } from "box-multi-tracker";
-import type { AnalyticsInstance, AnalyticsProvider, ProviderEntry } from "box-multi-tracker";
+import type {
+  AnalyticsInstance,
+  AnalyticsProvider,
+  ProviderEntry,
+  ProviderError,
+  ValidationError,
+} from "box-multi-tracker";
 import type { DispatchLog } from "./dispatch-log";
 import type { AppEventInputs, AppEvents } from "./events";
 import { observeProvider } from "./observed-provider";
@@ -10,6 +16,8 @@ import { createMockAnalyticsProvider } from "./providers/mock-analytics.provider
 import { appEventValidator } from "./schemas";
 import { createTracking } from "./tracking";
 import type { Tracking } from "./tracking";
+import { createValidatorFault, withValidatorFault } from "./validator-fault";
+import type { ValidatorFault } from "./validator-fault";
 
 export type ProviderKind = "console" | "mock-analytics" | "flaky-service";
 
@@ -19,11 +27,22 @@ export interface ProviderSetup {
   enabled: boolean;
 }
 
+/**
+ * Where an instance reports its failures besides the event log. Structurally the
+ * handlers of `createSentryReporter`, but this layer does not know about Sentry.
+ */
+export interface MonitoringHandlers {
+  onProviderError(error: ProviderError): void;
+  onValidationError(error: ValidationError): void;
+}
+
 export interface AppAnalyticsOptions {
   instanceId: string;
   label: string;
   providers: readonly ProviderSetup[];
   log: DispatchLog;
+  /** Optional monitoring (for example the Sentry reporter), connected to the SDK's error callbacks. */
+  monitoring?: MonitoringHandlers;
 }
 
 /** Everything the playground needs from one configured analytics instance. */
@@ -36,6 +55,7 @@ export interface AppAnalytics {
   readonly analytics: Pick<AnalyticsInstance<AppEvents, AppEventInputs>, "enableProvider" | "disableProvider" | "isProviderEnabled">;
   readonly tracking: Tracking;
   readonly failure: FailureControl;
+  readonly validatorFault: ValidatorFault;
 }
 
 /**
@@ -46,6 +66,8 @@ export interface AppAnalytics {
 export function createAppAnalytics(options: AppAnalyticsOptions): AppAnalytics {
   const { instanceId, label, log } = options;
   const failure = createFailureControl();
+  const validatorFault = createValidatorFault();
+  const { monitoring } = options;
 
   const recorder = { start: (providerName: string, event: { name: string; payload: unknown }) =>
     log.recordDelivery(instanceId, providerName, event) };
@@ -69,10 +91,17 @@ export function createAppAnalytics(options: AppAnalyticsOptions): AppAnalytics {
   const analytics = createAnalytics<AppEvents, AppEventInputs>({
     providers,
     // Every event is validated, and possibly transformed, before any provider sees it.
-    validator: appEventValidator,
+    validator: withValidatorFault(appEventValidator, validatorFault),
     // Provider failures and validation failures arrive through separate callbacks.
-    onError: (error) => log.reportError(instanceId, error),
-    onValidationError: (error) => log.reportValidationError(instanceId, error),
+    // Each goes to the event log and, when configured, to monitoring.
+    onError: (error) => {
+      log.reportError(instanceId, error);
+      monitoring?.onProviderError(error);
+    },
+    onValidationError: (error) => {
+      log.reportValidationError(instanceId, error);
+      monitoring?.onValidationError(error);
+    },
   });
 
   const providerNames = providers.map((entry) => entry.provider.name);
@@ -83,5 +112,5 @@ export function createAppAnalytics(options: AppAnalyticsOptions): AppAnalytics {
     log.runDispatch(instanceId, eventName, payload, skipped, send);
   });
 
-  return { instanceId, label, providerNames, analytics, tracking, failure };
+  return { instanceId, label, providerNames, analytics, tracking, failure, validatorFault };
 }

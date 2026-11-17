@@ -6,6 +6,7 @@ A small, framework-agnostic TypeScript library for sending one analytics event t
 - **Provider-agnostic Core.** The library contains no vendor code. Providers (GTM, Mixpanel, your own HTTP endpoint, ...) are written by your application and injected.
 - **Failure isolation.** A provider that throws or rejects never stops other providers and never throws into your application.
 - **Optional runtime validation.** Plug in a validator to check, and transform, payloads before any provider sees them. A [Zod adapter](#the-zod-adapter) is included as a separate, optional entry point.
+- **Optional Sentry reporting.** A small [Sentry adapter](#the-sentry-adapter) reports SDK failures (never payloads) through the existing error callbacks, as a separate, optional entry point.
 - **Zero runtime dependencies**, ESM-only, no browser or Node APIs.
 
 ## Contents
@@ -23,6 +24,7 @@ A small, framework-agnostic TypeScript library for sending one analytics event t
 - [Instance state and isolation](#instance-state-and-isolation)
 - [Runtime validation](#runtime-validation)
 - [The Zod adapter](#the-zod-adapter)
+- [The Sentry adapter](#the-sentry-adapter)
 - [API reference](#api-reference)
 - [Out of scope](#out-of-scope)
 - [Development](#development)
@@ -56,6 +58,14 @@ npm install zod
 ```
 
 If you do not import `box-multi-tracker/zod`, you do not need Zod.
+
+Sentry reporting is optional as well. To use the Sentry adapter, install `@sentry/browser` 11 yourself (again an optional peer dependency):
+
+```bash
+npm install @sentry/browser
+```
+
+If you do not import `box-multi-tracker/sentry`, you do not need Sentry. The Core entry point never imports it.
 
 ## Quick start
 
@@ -518,6 +528,58 @@ Zod's `safeParse` result is converted to the framework-independent `ValidationRe
 - Only synchronous schemas are supported. A schema that throws when parsed (for example one with an async refinement) is reported as a failed validation (`Validator threw: ...`), and the event is not delivered.
 - Schemas are not modified.
 
+## The Sentry adapter
+
+`box-multi-tracker/sentry` reports failures of the SDK itself to Sentry. It is a separate entry point (requires `@sentry/browser@^11`, installed by you); Core never imports Sentry and works without it.
+
+It adds nothing to Core. It is a pair of handlers for the callbacks that already exist, `onError` and `onValidationError`:
+
+```ts
+import * as Sentry from "@sentry/browser";
+import { createAnalytics } from "box-multi-tracker";
+import { createSentryReporter } from "box-multi-tracker/sentry";
+
+// Your application initializes Sentry. The adapter never does.
+Sentry.init({ dsn: "...", defaultIntegrations: false /* see "Privacy" below */ });
+
+const sentry = createSentryReporter({ instanceId: "checkout" });
+
+const analytics = createAnalytics<AppEvents>({
+  providers: [...],
+  onError: sentry.onProviderError,
+  onValidationError: sentry.onValidationError,
+});
+```
+
+`instanceId` is any string that tells your analytics instances apart. If you also need your own handling, call the reporter from your callbacks: `onError: (error) => { log(error); sentry.onProviderError(error); }`.
+
+### What is reported
+
+| Situation | Reported? | Tags |
+| --- | --- | --- |
+| A provider throws (synchronously) or its promise rejects | Yes, as the original `Error` | `source`, `instance`, `error_type=provider_error`, `provider`, `event` |
+| A validator throws | Yes, as the thrown `Error` | `source`, `instance`, `error_type=validator_exception`, `event` |
+| A payload fails validation (an ordinary invalid payload) | **No** | none |
+| Sentry itself throws or rejects | No, swallowed and never reported again | none |
+
+`source` is always `box-multi-tracker`. Events are sent with `captureException`, level `error`, and a `box_multi_tracker` context holding `thrown_value_was_error` (whether the original value was an `Error`) and, for validator exceptions, `issue_count`.
+
+A validator exception is recognized by the **presence** of the `cause` property on `ValidationError`, not by its value (a validator can throw `undefined`). Ordinary validation failures have no `cause` property.
+
+### Privacy
+
+- The adapter only receives `ProviderError` and `ValidationError`. Neither carries the tracked payload, and the adapter never sees the event object, so it cannot send them.
+- Thrown values that are not `Error` instances are **not** sent; a fixed message is sent instead, because a thrown string or object may contain payload data.
+- Validation issue messages are not sent, only their number.
+- Messages of thrown `Error`s are sent as they are. They are written by your provider or validator, so do not put payload data in them.
+
+### Limitations
+
+- **Sentry's default integrations can leak payloads.** By default `@sentry/browser` attaches console output, clicks and fetch calls to events as breadcrumbs. If any provider logs payloads (for example a console provider), they end up in Sentry events. This is configured where you call `Sentry.init`, not in the adapter: disable the integrations you do not want (`defaultIntegrations: false`, or `maxBreadcrumbs: 0`, or filter in `beforeBreadcrumb`).
+- The adapter does not initialize, flush, retry, queue or batch. Delivery is up to Sentry.
+- Importing `box-multi-tracker/sentry` without `@sentry/browser` installed fails when the module loads. Core and the Zod adapter are unaffected.
+- The adapter is tested against `@sentry/browser` 11.13; other 11.x versions are expected to work but are not verified.
+
 ## API reference
 
 ```ts
@@ -595,9 +657,26 @@ function createZodValidator<S extends ZodEventSchemas<S>>(
 
 Exported value: `createZodValidator`. Exported types: `ZodEventSchemas`, `InferInputEvents`, `InferOutputEvents`.
 
+**`box-multi-tracker/sentry`** (optional; requires `@sentry/browser@^11`):
+
+```ts
+function createSentryReporter(options: SentryReporterOptions): SentryReporter;
+
+interface SentryReporterOptions {
+  instanceId: string;
+}
+
+interface SentryReporter {
+  onProviderError(error: ProviderError): void;
+  onValidationError(error: ValidationError): void;
+}
+```
+
+Exported value: `createSentryReporter`. Exported types: `SentryReporter`, `SentryReporterOptions`.
+
 ## Out of scope
 
-This library intentionally does only what is described above. It has no `identify`, `reset`, `init`, `flush` or `shutdown` APIs, and no buffering, retries, batching, persistence or per-provider event filtering or routing. Validation (see [Runtime validation](#runtime-validation)) is optional and applies to an event as a whole: it can reject an event for every provider or transform it for every provider, never for just some. Vendor integrations are written by the consuming application.
+This library intentionally does only what is described above. It has no `identify`, `reset`, `init`, `flush` or `shutdown` APIs, and no buffering, retries, batching, persistence or per-provider event filtering or routing. Validation (see [Runtime validation](#runtime-validation)) is optional and applies to an event as a whole: it can reject an event for every provider or transform it for every provider, never for just some. Vendor integrations are written by the consuming application; the only one included is the optional [Sentry adapter](#the-sentry-adapter), which reports SDK failures and nothing else.
 
 ## Development
 

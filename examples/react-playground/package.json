@@ -19,6 +19,7 @@
     "clean": "node -e \"import('node:fs').then(fs => fs.rmSync('dist', { recursive: true, force: true }))\""
   },
   "dependencies": {
+    "@sentry/browser": "^11.13.0",
     "box-multi-tracker": "file:.sdk/box-multi-tracker.tgz",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",

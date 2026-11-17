@@ -417,3 +417,22 @@ button.link {
 .scenario .row {
   align-items: center;
 }
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0;
+}
+
+.tag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg);
+  font-size: 0.75rem;
+}
+
+.log-entry details {
+  margin-top: 8px;
+  font-size: 0.85rem;
+}
