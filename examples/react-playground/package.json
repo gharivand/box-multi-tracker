@@ -1,0 +1,35 @@
+{
+  "name": "box-multi-tracker-example-react-playground",
+  "version": "0.0.0",
+  "private": true,
+  "description": "React + Vite consumer application for box-multi-tracker. Installs the SDK from a packed tarball, exactly as an external consumer would.",
+  "type": "module",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "dev": "vite",
+    "build": "npm run typecheck:app && vite build",
+    "preview": "vite preview",
+    "typecheck": "npm run typecheck:app && npm run typecheck:public-api",
+    "typecheck:app": "tsc -p tsconfig.json",
+    "typecheck:public-api": "npm run typecheck:nodenext && npm run typecheck:bundler",
+    "typecheck:nodenext": "tsc -p type-checks/tsconfig.nodenext.json",
+    "typecheck:bundler": "tsc -p type-checks/tsconfig.bundler.json",
+    "test": "vitest run",
+    "verify": "npm run typecheck && npm test && vite build",
+    "clean": "node -e \"import('node:fs').then(fs => fs.rmSync('dist', { recursive: true, force: true }))\""
+  },
+  "dependencies": {
+    "box-multi-tracker": "file:.sdk/box-multi-tracker.tgz",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  }
+}
