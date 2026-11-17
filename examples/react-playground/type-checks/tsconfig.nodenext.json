@@ -1,7 +1,9 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022"],
+    // The SDK needs only ES2022. DOM is here because Zod's own declarations
+    // reference the `URL` global, and a real consumer always has it (DOM or Node types).
+    "lib": ["ES2022", "DOM"],
     "types": [],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",

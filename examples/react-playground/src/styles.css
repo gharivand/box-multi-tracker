@@ -240,6 +240,11 @@ button.link {
   color: var(--muted);
 }
 
+.badge.rejected {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
 .badge.instance {
   background: #e8efff;
   color: var(--accent);
@@ -367,4 +372,48 @@ button.link {
 .delivery.error {
   background: var(--error-bg);
   color: var(--error);
+}
+
+.payload-label {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.payload-label + pre {
+  margin-top: 4px;
+}
+
+.validation-failure {
+  border: 1px solid var(--error);
+  border-radius: 4px;
+  padding: 4px 8px 8px;
+}
+
+.validation-failure .error-text {
+  margin: 4px 0;
+}
+
+.validation-failure ul {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 0.85rem;
+}
+
+.scenario {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.scenario:first-of-type {
+  border-top: none;
+}
+
+.scenario .row {
+  align-items: center;
 }

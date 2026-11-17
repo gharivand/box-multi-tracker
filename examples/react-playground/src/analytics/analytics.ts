@@ -1,12 +1,13 @@
 import { createAnalytics } from "box-multi-tracker";
 import type { AnalyticsInstance, AnalyticsProvider, ProviderEntry } from "box-multi-tracker";
 import type { DispatchLog } from "./dispatch-log";
-import type { AppEvents } from "./events";
+import type { AppEventInputs, AppEvents } from "./events";
 import { observeProvider } from "./observed-provider";
 import { createConsoleProvider } from "./providers/console.provider";
 import { createFailureControl, createFlakyProvider } from "./providers/flaky.provider";
 import type { FailureControl } from "./providers/flaky.provider";
 import { createMockAnalyticsProvider } from "./providers/mock-analytics.provider";
+import { appEventValidator } from "./schemas";
 import { createTracking } from "./tracking";
 import type { Tracking } from "./tracking";
 
@@ -32,7 +33,7 @@ export interface AppAnalytics {
   /** Provider names, in registration order. */
   readonly providerNames: readonly string[];
   /** Only the provider-management part of the SDK API is exposed. */
-  readonly analytics: Pick<AnalyticsInstance<AppEvents>, "enableProvider" | "disableProvider" | "isProviderEnabled">;
+  readonly analytics: Pick<AnalyticsInstance<AppEvents, AppEventInputs>, "enableProvider" | "disableProvider" | "isProviderEnabled">;
   readonly tracking: Tracking;
   readonly failure: FailureControl;
 }
@@ -65,9 +66,13 @@ export function createAppAnalytics(options: AppAnalyticsOptions): AppAnalytics {
     enabled,
   }));
 
-  const analytics = createAnalytics<AppEvents>({
+  const analytics = createAnalytics<AppEvents, AppEventInputs>({
     providers,
+    // Every event is validated, and possibly transformed, before any provider sees it.
+    validator: appEventValidator,
+    // Provider failures and validation failures arrive through separate callbacks.
     onError: (error) => log.reportError(instanceId, error),
+    onValidationError: (error) => log.reportValidationError(instanceId, error),
   });
 
   const providerNames = providers.map((entry) => entry.provider.name);

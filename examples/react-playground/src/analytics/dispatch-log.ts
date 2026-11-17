@@ -1,4 +1,4 @@
-import type { ProviderError } from "box-multi-tracker";
+import type { ProviderError, ValidationError, ValidationIssue } from "box-multi-tracker";
 
 // A framework-agnostic store describing what happened to each tracked event.
 // It exists to make the SDK's dispatch behavior visible in the playground; the
@@ -11,6 +11,8 @@ export interface Delivery {
   readonly providerName: string;
   /** 1-based position in the order providers were invoked. */
   readonly position: number;
+  /** The payload this provider received (after validation and transformation). */
+  readonly receivedPayload: unknown;
   readonly status: DeliveryStatus;
   readonly errorMessage?: string;
   /** True once the SDK reported this failure through `onError`. */
@@ -23,7 +25,13 @@ export interface DispatchEntry {
   readonly id: number;
   readonly instanceId: string;
   readonly eventName: string;
+  /** The payload as it was passed to `track`, before validation. */
   readonly payload: unknown;
+  /**
+   * Set when validation rejected the event (reported through
+   * `onValidationError`). A rejected event has no deliveries.
+   */
+  readonly validationIssues?: readonly ValidationIssue[];
   /** Providers that were disabled when the event was tracked, so it skipped them. */
   readonly skippedProviders: readonly string[];
   readonly deliveries: readonly Delivery[];
@@ -48,8 +56,10 @@ export interface DispatchLog {
   ): void;
   /** Records that a provider was invoked. Returns a handle to record its outcome. */
   recordDelivery(instanceId: string, providerName: string, event: { name: string; payload: unknown }): DeliveryHandle;
-  /** Records an `onError` report from the SDK. */
+  /** Records an `onError` report from the SDK (a provider failed). */
   reportError(instanceId: string, error: ProviderError): void;
+  /** Records an `onValidationError` report from the SDK (validation rejected the event). */
+  reportValidationError(instanceId: string, error: ValidationError): void;
 }
 
 const MAX_ENTRIES = 200;
@@ -75,6 +85,15 @@ export function countDeliveries(
     }
   }
   return counts;
+}
+
+/**
+ * Whether the payload a provider received equals the payload that was tracked.
+ * Compared structurally, so a transformation (for example `"500"` to `500`)
+ * shows up as a difference.
+ */
+export function samePayload(tracked: unknown, received: unknown): boolean {
+  return JSON.stringify(tracked ?? null) === JSON.stringify(received ?? null);
 }
 
 export function errorMessage(error: unknown): string {
@@ -146,7 +165,10 @@ export function createDispatchLog(): DispatchLog {
       const position = (entry?.deliveries.length ?? 0) + 1;
       updateEntry(entryId, (current) => ({
         ...current,
-        deliveries: [...current.deliveries, { providerName, position, status: "pending", reportedToOnError: false }],
+        deliveries: [
+          ...current.deliveries,
+          { providerName, position, receivedPayload: event.payload, status: "pending", reportedToOnError: false },
+        ],
       }));
 
       return {
@@ -158,6 +180,12 @@ export function createDispatchLog(): DispatchLog {
             errorMessage: errorMessage(error),
           })),
       };
+    },
+
+    reportValidationError(instanceId, error) {
+      // Validation runs synchronously inside `track`, so the open entry is the rejected event.
+      const entryId = open.get(instanceId) ?? createEntry(instanceId, error.eventName, undefined, []).id;
+      updateEntry(entryId, (current) => ({ ...current, validationIssues: error.issues }));
     },
 
     reportError(instanceId, error) {

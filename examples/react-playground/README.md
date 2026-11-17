@@ -10,6 +10,35 @@ A realistic frontend consumer of `box-multi-tracker`, built with Vite, React and
 - Provider failure isolation, reported through the configured `onError`.
 - Unknown provider behavior (`enableProvider("does-not-exist")` throws, `isProviderEnabled` returns `false`).
 - A live event log: event, payload, global order, each provider in invocation order with its outcome, skipped (disabled) providers, and dropped events.
+- **Runtime validation with the Zod adapter** (`box-multi-tracker/zod`): every event is validated before any provider sees it. See [Validation](#validation).
+
+## Validation
+
+The analytics layer configures a validator built from Zod schemas (`src/analytics/schemas.ts`), passed to `createAnalytics` together with `onValidationError`. The **Validation** card in the app runs four scenarios, and the event log shows what happened:
+
+| Scenario | What you see in the log |
+| --- | --- |
+| Valid order, total sent as text (`"500"`) | **Tracked payload** has `totalPrice: "500"`; **Providers received** shows `totalPrice: 500`. Every provider got the transformed payload. |
+| Valid product, messy input (padded name, price `"4.50"`) | Trimmed name and `price: 4.5` reach the providers. |
+| Invalid order (empty `orderId`, `itemsCount: -1`) | A red *validation failed* block listing each issue with its path. **No provider is called**: the provider rows are absent and the provider counters do not move. |
+| Invalid product price (`"abc"`) | Same: rejected, nothing delivered, even to enabled providers. |
+
+Things to try:
+
+- Run a valid scenario while `flaky-service` is set to *throws*: the failure is reported to `onError` (the *reported to onError* badge) and the other providers still receive the transformed payload.
+- Run an invalid scenario in the same situation: nothing reaches any provider, so `onError` is not involved at all. Validation errors and provider errors use separate callbacks.
+- Disable all providers of an instance and run an invalid scenario: it is still validated and reported.
+- Use the other features (login, product details, complete order): they now go through the same validator, and their payloads are unchanged because they are already valid.
+
+How it is wired:
+
+- `events.ts` holds two maps: `AppEvents` (what providers receive) and `AppEventInputs` (what `track` accepts; prices may be text).
+- `schemas.ts` defines one schema per event and annotates the result as `EventValidator<AppEventInputs, AppEvents>`, so the compiler checks the schemas against the hand-written maps.
+- `analytics.ts` calls `createAnalytics<AppEvents, AppEventInputs>({ providers, validator, onError, onValidationError })`.
+- `dispatch-log.ts` records the tracked payload, what each provider received, and any validation issues; `EventLog` renders them.
+- `features/validation/validation-demo/` is the feature that triggers the scenarios, through the same `Tracking` abstraction as every other feature.
+
+The example installs `zod` as its own dependency. The SDK does not install it.
 
 ## Install and run
 
@@ -31,8 +60,9 @@ npm run verify    # typecheck app + public API (NodeNext & Bundler) + tests + pr
 src/
   app/                       composition: App, PlaygroundProvider, context, hooks
   analytics/                 the application's analytics layer
-    events.ts                AppEvents: the typed event map (owned by the app)
-    analytics.ts             composition root: builds providers, calls createAnalytics<AppEvents>()
+    events.ts                AppEvents (provider payloads) and AppEventInputs (track payloads)
+    schemas.ts               Zod schemas per event -> createZodValidator (validation rules, owned by the app)
+    analytics.ts             composition root: builds providers, calls createAnalytics<AppEvents, AppEventInputs>()
     tracking.ts              semantic tracking API used by features
     providers/               console, mock-analytics, flaky (test double)
     observed-provider.ts     decorator recording provider calls for the log (demo only)
@@ -48,4 +78,4 @@ type-checks/                 public-API type checks, run under NodeNext and Bund
 - Components render and forward interactions; feature hooks own state and orchestration; business logic lives in plain TypeScript services.
 - Features depend on the `Tracking` abstraction (narrowed per feature with `Pick`), never on the SDK or a provider.
 - The event is tracked only at the semantic point where it is true: after a successful login, after the product has loaded, after the order was created. Failures track nothing.
-- `type-checks/public-api.ts` is a self-contained consumer check (valid and invalid events and payloads, narrowing, public type imports, inaccessible internals). It is separate from the app because NodeNext needs `.js` import extensions, which a Vite app does not use.
+- `type-checks/public-api.ts` is a self-contained consumer check (valid and invalid events and payloads, narrowing, the validator contract, `box-multi-tracker/zod`, public type imports, inaccessible internals). It is separate from the app because NodeNext needs `.js` import extensions, which a Vite app does not use.

@@ -1,14 +1,15 @@
 # box-multi-tracker: Architecture
 
-Status: design only (no implementation yet).
+Status: implemented. Optional runtime validation (section 5.6) was added after the first implementation; everything else is unchanged by it.
 Scope: Senior Frontend take-home. The goal is a small, clean, well-tested core with a type-safe API, not a production analytics platform.
 
 ## 1. Summary
 
-`box-multi-tracker` is a standalone, framework-agnostic TypeScript library with zero runtime dependencies. It does two things:
+`box-multi-tracker` is a standalone, framework-agnostic TypeScript library with zero runtime dependencies. It does three things:
 
 1. Defines the **provider contract** (`AnalyticsProvider`).
 2. **Dispatches** each tracked event to every enabled provider, isolating failures.
+3. Optionally **validates** each payload through an injected, library-independent `EventValidator` before dispatch (5.6).
 
 Everything else lives outside Core:
 
@@ -16,6 +17,7 @@ Everything else lives outside Core:
 - Vendor name and payload mapping.
 - Provider configuration.
 - Business event names and payload types.
+- Any validation library. Core only knows the `EventValidator` contract; Zod is an optional adapter in its own entry point (`box-multi-tracker/zod`).
 
 **Pattern:** a factory function (`createAnalytics`) that encapsulates per-instance state in a closure and returns a small facade (`AnalyticsInstance`), plus Strategy (`AnalyticsProvider`) with Dependency Injection through the factory configuration. Dispatch is a plain loop. No classes in Core, no event bus, no registry, no singleton, no module-level state.
 
@@ -25,6 +27,8 @@ Everything else lives outside Core:
 flowchart LR
   App[ConsumingApp] -->|"track(name, payload)"| Instance[AnalyticsInstance]
   Factory[createAnalytics] -.creates closure state and returns.-> Instance
+  Instance -.->|"optional: validate"| Validator[EventValidator]
+  Validator -.->|"invalid: not dispatched"| OnValidationError[optional onValidationError]
   Instance -->|enabled| ProviderA
   Instance -->|enabled| ProviderB
   Instance -.->|disabled: skipped| ProviderC
@@ -41,9 +45,11 @@ flowchart LR
 - The `createAnalytics` factory and the `AnalyticsInstance` it returns: `track`, provider enable/disable/query.
 - Fan-out dispatch in registration order.
 - Sync and async error isolation, plus the optional `onError` hook.
+- The `EventValidator` contract and the optional validation step before dispatch, plus the separate `onValidationError` hook (5.6).
 
 **Core does NOT own**
 - Any vendor code or dependency.
+- Any validation library, or knowledge of one. Validation rules live in the app (or an adapter such as `box-multi-tracker/zod`), never in Core.
 - Event names or payload types (the app defines them).
 - Name or payload mapping to vendors (inside each provider).
 - Provider configuration (inside each provider's own setup, for example its constructor or factory).
@@ -100,9 +106,13 @@ interface ProviderEntry<T extends EventMap<T>> {
   enabled?: boolean;                 // default true
 }
 
-interface AnalyticsConfig<T extends EventMap<T>> {
+// T: what providers receive. TInput: what `track` accepts (defaults to T).
+// They only differ when a validator transforms payloads (5.6).
+interface AnalyticsConfig<T extends EventMap<T>, TInput extends EventMap<TInput> = T> {
   providers: ReadonlyArray<ProviderEntry<T>>;
   onError?: (error: ProviderError) => void;
+  validator?: EventValidator<TInput, T>;                       // optional, see 5.6
+  onValidationError?: (error: ValidationError) => void;        // optional, see 5.6
 }
 
 interface ProviderError {
@@ -111,12 +121,16 @@ interface ProviderError {
   error: unknown;                    // whatever the provider threw or rejected with
 }
 
+// Two overloads (the validator overload is first on purpose, see 5.6).
+function createAnalytics<T extends EventMap<T>, TInput extends EventMap<TInput>>(
+  config: AnalyticsConfig<T, TInput> & { validator: EventValidator<TInput, T> },
+): AnalyticsInstance<T, TInput>;
 function createAnalytics<T extends EventMap<T> = DefaultEvents>(
   config: AnalyticsConfig<T>,
 ): AnalyticsInstance<T>;
 
-interface AnalyticsInstance<T extends EventMap<T> = DefaultEvents> {
-  track<K extends keyof T & string>(name: K, ...args: TrackArgs<T, K>): void;
+interface AnalyticsInstance<T extends EventMap<T> = DefaultEvents, TInput extends EventMap<TInput> = T> {
+  track<K extends keyof T & keyof TInput & string>(name: K, ...args: TrackArgs<TInput, K>): void;
   enableProvider(name: string): void;
   disableProvider(name: string): void;
   isProviderEnabled(name: string): boolean;
@@ -162,8 +176,13 @@ analytics.isProviderEnabled("mixpanel"); // false
 
 **Exports from `index.ts`**
 - Value: `createAnalytics`.
-- Types: `AnalyticsInstance`, `AnalyticsProvider`, `AnalyticsEvent`, `AnalyticsConfig`, `ProviderEntry`, `ProviderError`, `EventMap`.
+- Types: `AnalyticsInstance`, `AnalyticsProvider`, `AnalyticsEvent`, `AnalyticsConfig`, `ProviderEntry`, `ProviderError`, `EventMap`, `EventValidator`, `ValidationResult`, `ValidationIssue`, `ValidationError`.
 - Nothing else. `TrackArgs` and internals stay private.
+
+**Exports from `box-multi-tracker/zod` (separate entry point, optional)**
+- Value: `createZodValidator`.
+- Types: `ZodEventSchemas`, `InferInputEvents`, `InferOutputEvents`.
+- Importing this entry point is the only place `zod` is referenced, and only as types.
 
 **Improvements over the original conceptual example**
 - The event map is an explicit generic (`createAnalytics<AppEvents>`) because TypeScript cannot reliably infer it from providers.
@@ -199,12 +218,13 @@ analyticsB.isProviderEnabled("mixpanel"); // unaffected by the line above
 
 ### 5.1 `track` dispatch flow
 
-1. Build the event `{ name, payload }`.
-2. For each provider entry in registration order:
+1. **If a `validator` is configured**, validate the payload first (5.6). A rejected payload is reported to `onValidationError` and `track` returns: no provider is called. An accepted payload is replaced by the validator's output (possibly transformed). Without a validator this step does not exist and the payload is used unchanged.
+2. Build the event `{ name, payload }`.
+3. For each provider entry in registration order:
    - Skip if disabled.
    - Run the provider call as one guarded unit (see 5.3).
    - Any failure is reported to `onError` and dispatching continues.
-3. Return `void`. Nothing is awaited and nothing is thrown.
+4. Return `void`. Nothing is awaited and nothing is thrown.
 
 The same event object is passed to every provider (no cloning).
 
@@ -216,6 +236,7 @@ sequenceDiagram
   participant ProvB as ProviderB
   participant Hook as onError
   App->>Instance: track(name, payload)
+  Note over Instance: optional: validator.validate(name, payload)<br/>invalid: onValidationError, stop (no provider is called)
   Instance->>ProvA: track(event)
   ProvA--xInstance: throws or rejects
   Instance->>Hook: ProviderError (protected)
@@ -273,26 +294,104 @@ Other points:
 - Events tracked while a provider is disabled are dropped, not replayed.
 - A provider calling `analytics.track` from inside its own `track` can loop. This is unguarded and treated as a provider bug.
 
+### 5.6 Runtime validation (optional)
+
+TypeScript checks events at compile time only. Data that reaches `track` from outside the type system (a form field, a URL parameter, an API response) is not covered. Runtime validation closes that gap, and can also normalize payloads before any provider sees them.
+
+**Why validation is optional.** Many consumers already have trustworthy types and do not want the cost or the dependency. Without a `validator`, `track` behaves exactly as before: no extra work, no behavior change, no new failure modes. Validation is a capability, not a requirement.
+
+**The contract (Core, library-independent).**
+
+```ts
+interface ValidationIssue { readonly message: string; readonly path: ReadonlyArray<string | number> }
+
+type ValidationResult<T> =
+  | { readonly success: true; readonly data: T }
+  | { readonly success: false; readonly issues: ReadonlyArray<ValidationIssue> };
+
+interface EventValidator<TInput extends EventMap<TInput>, T extends EventMap<T> = TInput> {
+  readonly validate: <K extends keyof TInput & keyof T & string>(
+    name: K,
+    payload: TInput[K],
+  ) => ValidationResult<T[K]>;
+}
+
+interface ValidationError { eventName: string; issues: ReadonlyArray<ValidationIssue>; cause?: unknown }
+```
+
+It is deliberately small: one function, and a result that is plain data. No schema type, no library error type, no exception contract. Anything that can produce a `ValidationResult` can be a validator: a Zod adapter, a hand-written function, another schema library.
+
+**Runtime decisions.**
+- **Before dispatch, once per `track`.** The validator runs once, before the enabled-provider snapshot, so it also runs when every provider is disabled and the result is the same for every provider.
+- **A failed validation reaches no provider.** The event is reported to `onValidationError` (if configured) and dropped. Disabled and enabled providers alike never see it.
+- **A successful validation replaces the payload.** Providers receive `result.data`, so a transformation (`{ total: "500" }` becomes `{ total: 500 }`) is what they get. Every provider receives the same transformed object, as before.
+- **Validation errors are not provider errors.** They go to a dedicated `onValidationError`, never to `onError`. `ProviderError` means "a provider failed"; `ValidationError` means "the event was rejected before any provider ran". The two callbacks have different causes and different remedies, so they are kept apart.
+- **Neither callback can break the SDK.** `onValidationError` goes through the same never-throwing reporter as `onError`: a sync throw is swallowed, and an async rejection or odd thenable is observed, so there is no unhandled rejection.
+- **A misbehaving validator fails closed.** If `validate` throws, or returns something that is not a `ValidationResult`, the event is dropped and reported with one issue (`Validator threw: ...`) and the underlying error in `cause`. Silently dispatching unvalidated data after a validator bug would defeat the purpose of validating. `cause` is set only in this case.
+- **No payload in `ValidationError`.** Like `ProviderError`, it carries the event name and the issues, not the payload, so PII is not forwarded to error sinks. Issue messages come from the validator and are the validator's responsibility.
+- **Configuration is snapshotted at construction**, like the providers. Two instances can use different validators and never share state.
+- **No buffering, retries, batching or persistence.** A rejected event is gone, as is an event for a disabled provider.
+
+**Typing.** Validation can change a payload's type, so there are two event maps: `T` is what providers receive, `TInput` is what `track` accepts.
+- `AnalyticsInstance<T, TInput = T>` and `AnalyticsConfig<T, TInput = T>` carry both. With no validator, `TInput = T` and every existing signature is unchanged.
+- `EventValidator<TInput, T>` goes from input to output, as the data does.
+- `createAnalytics({ providers, validator })` infers both maps from the validator, so callers rarely write them.
+- `validate` is a function-typed property (strict parameter checking), so a validator that does not cover every event, or produces the wrong output type, is a compile error. Transformed values are never cast to the original event type.
+- **Overload order matters.** The overload that requires a `validator` comes first. A validator that accepts a wider input than it produces (`string | number` in, `number` out) is also assignable to a validator with identical input and output; if the plain overload came first it would win and silently narrow `track` to the output types. A type test locks this in.
+- Giving two type arguments without a validator is a compile error (there would be no way to turn the input into the output).
+
+**The Zod adapter (`box-multi-tracker/zod`).**
+
+```ts
+const validator = createZodValidator({
+  order_created: z.object({ orderId: z.string(), total: z.coerce.number() }),
+  logout: z.undefined(),
+});
+// EventValidator<{ order_created: { orderId: string; total: unknown }; ... }, { ... total: number ... }>
+```
+
+- **Why an adapter and not part of Core.** Core's promise is "no runtime dependencies, no knowledge of any vendor". A hard Zod dependency would break that and tie every consumer to one library and one major version. The contract above lets Core stay ignorant and lets any library plug in.
+- **Separate entry point, not a separate package.** `box-multi-tracker/zod` lives in the same package (`exports["./zod"]`) so it is versioned with the contract it implements and needs no second publish. Importing `box-multi-tracker` never loads it, and `sideEffects: false` keeps unused code out of bundles.
+- **Optional peer dependency.** `zod` is a `peerDependency` (`^4.0.0`) marked optional in `peerDependenciesMeta`, so installing the SDK never installs Zod and consumers who do not import the adapter never need it. It is a `devDependency` here so tests can run. `dependencies` stays empty.
+- **No runtime import of Zod.** The adapter only does `import type { input, output, ZodType } from "zod"`; the emitted JavaScript has no import at all. It calls `schema.safeParse(...)` on the schemas the consumer passes in.
+- **What it does.** One schema per event (an object mapping event names to schemas). Input and output types are inferred from the schemas (`z.input` / `z.output`), so transforms, defaults and coercion type-check. A Zod failure becomes a plain `{ success: false, issues }` with only `message` and `path` (symbol path segments are stringified); no `ZodError` leaves the adapter. An event name with no schema is a failed validation (`No validation schema registered for ...`), not an exception, and inherited property names such as `toString` do not count as registered.
+- **Zod 4 only, synchronous only.** The adapter targets Zod 4 types. Async schemas (async refinements) make `safeParse` throw; that becomes a validator failure and the event is dropped, consistent with fail-closed. `track` is synchronous, and awaiting validation would add ordering and buffering questions that are out of scope.
+- **One localized cast.** Zod's output type is not provably the mapped output type at the point where one schema is picked by a generic key, so `result.data` is asserted once, inside the adapter, with a comment. The public types remain exact, and nothing in Core uses `any`.
+
+**Trade-offs.**
+- Two generics (`T`, `TInput`) add some surface. They are invisible when no validator is used and are normally inferred when one is.
+- With an overload set, a type error in a `createAnalytics` call can mention the overload that was tried last, which reads less clearly than a single signature.
+- A rejected event is silent unless `onValidationError` is set, matching `onError`.
+- Each `track` pays for one validator call when a validator is configured, and nothing otherwise.
+
 ## 6. Project structure
 
 ```
 box-multi-tracker/
   src/
     index.ts        # public exports only
-    types.ts        # EventMap, AnalyticsEvent, AnalyticsProvider, config and error types
-    analytics.ts    # createAnalytics factory: closure state, track, enable/disable, error isolation
+    types.ts        # EventMap, AnalyticsEvent, AnalyticsProvider, config, validator and error types
+    analytics.ts    # createAnalytics factory: closure state, validation step, track, enable/disable, error isolation
+    zod/
+      index.ts      # entry point `box-multi-tracker/zod` (re-exports only)
+      validator.ts  # createZodValidator: the only file that mentions Zod (type imports only)
   test/
-    analytics.test.ts   # runtime behavior
-    types.test-d.ts     # compile-time behavior
-    helpers.ts          # recording / throwing / rejecting test providers
+    analytics.test.ts       # runtime behavior
+    types.test-d.ts         # compile-time behavior
+    validation.test.ts      # Core validation, with a hand-written validator (no Zod)
+    validation.test-d.ts    # validation typing in Core
+    zod.test.ts             # Zod adapter, alone and end to end through createAnalytics
+    zod.test-d.ts           # Zod adapter typing and public exports
+    helpers.ts              # recording / throwing / rejecting test providers
   ARCHITECTURE.md
-  README.md             # usage and a sample custom provider snippet
+  README.md             # usage, validation, and a sample custom provider snippet
   package.json  tsconfig.json  (vitest config if needed)
 ```
 
 **Why this small:**
 - `types.ts` and `analytics.ts` separate the contract (what providers and apps import) from behavior.
 - Error isolation is about 15 lines. A separate file or `ErrorHandler` abstraction would be a layer without a reason, so it stays a small stateless helper inside `analytics.ts`.
+- `src/zod/` is the only folder besides the top-level files. It exists because the adapter is a separate public entry point; nothing outside it may import it, and nothing in it is imported by Core.
 - There is no `utils/`, `core/`, `providers/`, `internal/`, or `testing/` folder.
 - Tooling: TypeScript, Vitest, `tsc` for the build, **ESM-only** output with an `exports` map and `types`.
 - The sample custom provider is a snippet in `README.md`. Test helpers contain their own small providers; there is no `examples/` folder.
@@ -341,6 +440,28 @@ Unhandled rejections are verified by listening for the runtime's unhandled-rejec
 
 Plus readonly checks: assigning to `event.name`, `event.payload`, or a top-level payload property inside a provider is a compile error.
 
+**Validation runtime tests (`validation.test.ts`, no Zod).** A small hand-written validator proves Core depends only on the contract.
+- No validator: behavior is unchanged and `onValidationError` is never called.
+- Successful validation: providers receive the transformed payload; every provider gets the same event; the validator runs once, before any provider, and receives the event name and the original payload; payloadless events work.
+- Failed validation: no provider receives the event (including disabled ones); `onValidationError` gets the event name and issues, synchronously, without the payload; `onError` is not called; later valid events still work; no callback means silent; validation still runs when every provider is disabled.
+- Misbehaving validator: a throw, a non-`Error` throw and a non-result return all fail closed with `cause`.
+- Failing `onValidationError`: sync throw, async rejection and an odd thenable are swallowed with no unhandled rejection.
+- Provider isolation still works with a validator configured.
+- Two instances with different validators are independent, and the configuration is snapshotted at construction.
+
+**Zod adapter runtime tests (`zod.test.ts`).** Valid payloads; transformations (`"500"` to `500`, trim, default, lowercase); different schemas per event; optional and `undefined` payloads; the plain `{ success, issues }` shape with only `message` and `path`; nested paths and several issues; symbol path conversion; unknown events and inherited names (`toString`, `__proto__`) as failures; schemas are not mutated; and end to end through `createAnalytics` (the transformation example, validation error reporting, an async schema failing closed, two instances with different schemas).
+
+**Validation type tests (`validation.test-d.ts`, `zod.test-d.ts`).**
+- Input and output types are inferred from the validator (`AnalyticsInstance<Outputs, Inputs>`), and from Zod schemas.
+- `track` accepts input types and rejects output-only values; unknown names and invalid payloads are errors.
+- Providers see output types; a partial or wrong-output validator is rejected; two type arguments require a validator.
+- A validator with wider input than output keeps its input type (guards the overload order), and an identity validator infers identical maps.
+- Required and optional payloads, event-name to schema correspondence, non-object schemas rejected, and the public exports of both entry points.
+
+Mutation checks were also run by hand during development (ignoring the transform, dispatching invalid events, routing validation errors to `onError`, letting validator or callback errors escape, reordering the overloads); each is caught by at least two tests.
+
+**Public API type checks.** A file that imports only the built package, compiled under both `NodeNext` and `Bundler` module resolution (`examples/react-playground/type-checks/`), covers the validator contract and the `box-multi-tracker/zod` entry point, including that internals are unreachable.
+
 **Explicitly not tested:** package-compatibility matrices, publish checks, and bundle-size budgets.
 
 ## 8. Requirement traceability (is anything unnecessary?)
@@ -356,6 +477,7 @@ Plus readonly checks: assigning to `event.name`, `event.payload`, or a top-level
 - Optional `onError`, which cannot break tracking: `onError` plus its wrapper.
 - Sync and async providers: the `void | Promise<void>` return type.
 - Unit and type tests: `test/`.
+- Optional runtime validation, independent of any library: `EventValidator`, `onValidationError`, and the validation step in `track`; the Zod adapter in `src/zod/`.
 
 Duplicate-name validation exists only because name-based control requires uniqueness. Everything in Core maps to a stated requirement.
 
@@ -371,3 +493,8 @@ Duplicate-name validation exists only because name-based control requires unique
 8. **Async isolation:** guarded call plus `Promise.resolve` normalization inside `try/catch`, rejection handler, and a reporter that cannot throw. `track(): void`.
 9. **Scope:** no buffering, retries, persistence, batching, timeouts or lifecycle methods. These are deliberate scope decisions (5.5).
 10. **Construction pattern:** functional factory `createAnalytics<AppEvents>(config)` returning `AnalyticsInstance<AppEvents>`, with per-instance state in a closure. No class, no `this`, no module-level mutable state, no singleton. This replaces the earlier class-based `Analytics`; the API surface, types and behavior are otherwise unchanged.
+11. **Validation is optional and library-independent:** `validator?: EventValidator<TInput, T>` in the configuration. No validator means no behavior change. Core knows only the contract (`validate(name, payload)` returning plain-data `ValidationResult`).
+12. **Validation placement and outcome:** once per `track`, before dispatch. Invalid events reach no provider. Valid events reach every provider with the validator's (possibly transformed) payload.
+13. **Validation errors are separate:** `onValidationError(ValidationError)`, never `onError`. Both callbacks are isolated from the SDK. A throwing validator fails closed. No payload in `ValidationError`.
+14. **Typing:** two event maps (`T` output, `TInput` input, defaulting to `T`); both inferred from the validator; validator overload first; no `any`, no casts to bypass the type system in Core.
+15. **Zod is an adapter, not a dependency:** `box-multi-tracker/zod` (`createZodValidator`), an optional peer dependency (`zod` `^4.0.0`), type-only import. `dependencies` stays empty.

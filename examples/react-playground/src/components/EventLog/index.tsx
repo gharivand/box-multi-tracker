@@ -1,4 +1,5 @@
-import type { Delivery } from "../../analytics/dispatch-log";
+import { samePayload } from "../../analytics/dispatch-log";
+import type { Delivery, DispatchEntry } from "../../analytics/dispatch-log";
 import { useEventLog } from "./event-log.hook";
 
 function DeliveryLine({ delivery }: { delivery: Delivery }) {
@@ -17,6 +18,52 @@ function DeliveryLine({ delivery }: { delivery: Delivery }) {
         </span>
       )}
     </li>
+  );
+}
+
+function Json({ value }: { value: unknown }) {
+  return <pre>{JSON.stringify(value ?? null, null, 2)}</pre>;
+}
+
+function ValidationFailure({ issues }: { issues: NonNullable<DispatchEntry["validationIssues"]> }) {
+  return (
+    <div className="validation-failure">
+      <p className="error-text">
+        <span className="badge rejected">validation failed</span> Not delivered to any provider.
+      </p>
+      <ul>
+        {issues.map((issue, index) => (
+          <li key={index}>
+            <code>{issue.path.length > 0 ? issue.path.join(".") : "(payload)"}</code>: {issue.message}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function Deliveries({ entry }: { entry: DispatchEntry }) {
+  if (entry.deliveries.length === 0) {
+    return <p className="warn-text">No enabled provider received this event; it was dropped.</p>;
+  }
+
+  // Every provider receives the same validated payload, so the first one stands for all.
+  const received = entry.deliveries[0]?.receivedPayload;
+
+  return (
+    <>
+      {!samePayload(entry.payload, received) && (
+        <>
+          <p className="payload-label">Providers received (validated and transformed)</p>
+          <Json value={received} />
+        </>
+      )}
+      <ul className="deliveries">
+        {entry.deliveries.map((delivery) => (
+          <DeliveryLine key={delivery.position} delivery={delivery} />
+        ))}
+      </ul>
+    </>
   );
 }
 
@@ -45,19 +92,16 @@ export function EventLog() {
               <span className="badge instance">{instanceLabel(entry.instanceId)}</span>
               <strong>{entry.eventName}</strong>
             </div>
-            <pre>{JSON.stringify(entry.payload ?? null, null, 2)}</pre>
+            <p className="payload-label">Tracked payload</p>
+            <Json value={entry.payload} />
 
-            {entry.deliveries.length > 0 ? (
-              <ul className="deliveries">
-                {entry.deliveries.map((delivery) => (
-                  <DeliveryLine key={delivery.position} delivery={delivery} />
-                ))}
-              </ul>
+            {entry.validationIssues !== undefined ? (
+              <ValidationFailure issues={entry.validationIssues} />
             ) : (
-              <p className="warn-text">No enabled provider received this event; it was dropped.</p>
+              <Deliveries entry={entry} />
             )}
 
-            {entry.skippedProviders.length > 0 && (
+            {entry.validationIssues === undefined && entry.skippedProviders.length > 0 && (
               <p className="hint">
                 Skipped (disabled): {entry.skippedProviders.map((name) => `${name}`).join(", ")}
               </p>

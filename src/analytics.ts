@@ -5,7 +5,10 @@ import type {
   AnalyticsProvider,
   DefaultEvents,
   EventMap,
+  EventValidator,
   TrackArgs,
+  ValidationError,
+  ValidationResult,
 } from "./types.js";
 
 const noop = (): void => {};
@@ -27,17 +30,68 @@ function observe(value: unknown, onRejected: (error: unknown) => void): void {
 }
 
 /**
- * Creates an independent analytics instance. All state (providers, enabled
- * flags, `onError`) lives in this function's closure; nothing is shared
- * between instances and the returned methods do not use `this`.
+ * Calls a user-supplied report callback. Never throws: a failing callback
+ * (sync throw, rejected promise, odd thenable) must not affect tracking.
  */
+function notify<A>(callback: ((argument: A) => void) | undefined, argument: A): void {
+  if (callback === undefined) return;
+  try {
+    // The callback is typed as returning void, but may be async at runtime.
+    observe(callback(argument), noop);
+  } catch {
+    // Swallowed on purpose.
+  }
+}
+
+/** What validation decided: dispatch this payload, or report this error. */
+type Validation = { dispatch: true; payload: unknown } | { dispatch: false; error: ValidationError };
+
+/** Runs the validator for one event. Never throws: a throwing validator fails closed. */
+function validatePayload<
+  T extends EventMap<T>,
+  TInput extends EventMap<TInput>,
+  K extends keyof T & keyof TInput & string,
+>(validator: EventValidator<TInput, T>, name: K, payload: TInput[K]): Validation {
+  try {
+    const result: ValidationResult<T[K]> = validator.validate(name, payload);
+    if (result.success) {
+      return { dispatch: true, payload: result.data };
+    }
+    return { dispatch: false, error: { eventName: name, issues: result.issues } };
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    return {
+      dispatch: false,
+      error: { eventName: name, issues: [{ message: `Validator threw: ${reason}`, path: [] }], cause },
+    };
+  }
+}
+
+/**
+ * Creates an independent analytics instance. All state (providers, enabled
+ * flags, `onError`, the validator) lives in this function's closure; nothing is
+ * shared between instances and the returned methods do not use `this`.
+ *
+ * Without a `validator` the instance behaves exactly as it always has. With
+ * one, every payload is validated before dispatch; see `EventValidator`.
+ */
+// The validator overload comes first on purpose. A validator that accepts a
+// wider input than it produces (for example `number | string` in, `number` out)
+// is also assignable to a validator of identical input and output; matching the
+// plain overload first would silently narrow `track` to the output types.
+export function createAnalytics<T extends EventMap<T>, TInput extends EventMap<TInput>>(
+  config: AnalyticsConfig<T, TInput> & { validator: EventValidator<TInput, T> },
+): AnalyticsInstance<T, TInput>;
 export function createAnalytics<T extends EventMap<T> = DefaultEvents>(
   config: AnalyticsConfig<T>,
-): AnalyticsInstance<T> {
+): AnalyticsInstance<T>;
+export function createAnalytics<T extends EventMap<T>, TInput extends EventMap<TInput> = T>(
+  config: AnalyticsConfig<T, TInput>,
+): AnalyticsInstance<T, TInput> {
   // Snapshot of the configuration. `Map` keeps registration order and gives
   // lookup by name. Later changes to `config` or its entries are not seen.
   const providers = new Map<string, { provider: AnalyticsProvider<T>; enabled: boolean }>();
-  const { onError } = config;
+  const { onError, validator, onValidationError } = config;
 
   for (const entry of config.providers) {
     const { provider, enabled = true } = entry;
@@ -50,13 +104,7 @@ export function createAnalytics<T extends EventMap<T> = DefaultEvents>(
 
   /** Never throws: a failing `onError` must not affect tracking. */
   function report(providerName: string, eventName: string, error: unknown): void {
-    if (onError === undefined) return;
-    try {
-      // `onError` is typed as returning void, but may be async at runtime.
-      observe(onError({ providerName, eventName, error }), noop);
-    } catch {
-      // Swallowed on purpose.
-    }
+    notify(onError, { providerName, eventName, error });
   }
 
   function dispatch(
@@ -72,8 +120,20 @@ export function createAnalytics<T extends EventMap<T> = DefaultEvents>(
     }
   }
 
-  function track<K extends keyof T & string>(name: K, ...args: TrackArgs<T, K>): void {
-    const [payload] = args as readonly [unknown?];
+  function track<K extends keyof T & keyof TInput & string>(name: K, ...args: TrackArgs<TInput, K>): void {
+    const [input] = args as unknown as readonly [TInput[K]];
+
+    // Validation runs first. An invalid event is reported and goes nowhere.
+    let payload: unknown = input;
+    if (validator !== undefined) {
+      const validation = validatePayload(validator, name, input);
+      if (!validation.dispatch) {
+        notify(onValidationError, validation.error);
+        return;
+      }
+      payload = validation.payload;
+    }
+
     // One event object, shared by every provider (no cloning, no freezing).
     const event = { name, payload } as unknown as AnalyticsEvent<T>;
     // Snapshot the enabled providers first, so enable/disable calls made while

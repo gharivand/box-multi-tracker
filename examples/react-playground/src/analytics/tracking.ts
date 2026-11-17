@@ -1,15 +1,19 @@
 import type { AnalyticsInstance } from "box-multi-tracker";
-import type { AppEvents } from "./events";
+import type { AppEventInputs, AppEvents } from "./events";
 
 /**
  * Semantic tracking API used by features. Features depend on this interface,
  * not on the SDK or on any provider, so the analytics stack can change without
  * touching feature code.
+ *
+ * Payload types are the validator's input types: callers may pass what the
+ * validator accepts (for example a price as text), and providers receive the
+ * validated output declared by `AppEvents`.
  */
 export interface Tracking {
-  userSignedIn(payload: AppEvents["user_signed_in"]): void;
-  productViewed(payload: AppEvents["product_viewed"]): void;
-  orderCompleted(payload: AppEvents["order_completed"]): void;
+  userSignedIn(payload: AppEventInputs["user_signed_in"]): void;
+  productViewed(payload: AppEventInputs["product_viewed"]): void;
+  orderCompleted(payload: AppEventInputs["order_completed"]): void;
   userSignedOut(): void;
 }
 
@@ -23,7 +27,7 @@ const directly: TrackingScope = (_eventName, _payload, send) => send();
 
 /** Maps semantic methods onto a configured analytics instance. */
 export function createTracking(
-  analytics: AnalyticsInstance<AppEvents>,
+  analytics: AnalyticsInstance<AppEvents, AppEventInputs>,
   scope: TrackingScope = directly,
 ): Tracking {
   return {

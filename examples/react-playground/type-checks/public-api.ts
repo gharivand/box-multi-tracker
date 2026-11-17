@@ -15,9 +15,16 @@ import type {
   AnalyticsInstance,
   AnalyticsProvider,
   EventMap,
+  EventValidator,
   ProviderEntry,
   ProviderError,
+  ValidationError,
+  ValidationIssue,
+  ValidationResult,
 } from "box-multi-tracker";
+import { createZodValidator } from "box-multi-tracker/zod";
+import type { InferInputEvents, InferOutputEvents, ZodEventSchemas } from "box-multi-tracker/zod";
+import { z } from "zod";
 
 interface Events {
   user_signed_in: { userId: string; method: "email" | "google" };
@@ -170,3 +177,100 @@ import type * as InternalTypes from "box-multi-tracker/dist/types.js";
 import type * as InternalAnalytics from "box-multi-tracker/dist/analytics.js";
 
 export type _EventUnion = AnalyticsEvent<Events>;
+
+// --- Validation: the Core contract ----------------------------------------------
+
+interface Inputs {
+  order_completed: { orderId: string; totalPrice: number | string };
+  user_signed_out: undefined;
+}
+interface Outputs {
+  order_completed: { orderId: string; totalPrice: number };
+  user_signed_out: undefined;
+}
+
+// A hand-written validator needs no validation library.
+export const handWritten: EventValidator<Inputs, Outputs> = {
+  validate(name, payload) {
+    if (name === "user_signed_out") return { success: true, data: undefined } as ValidationResult<Outputs[typeof name]>;
+    void payload;
+    return { success: false, issues: [{ message: "rejected", path: [] }] };
+  },
+};
+
+declare const outputsProvider: AnalyticsProvider<Outputs>;
+
+// Both event maps are inferred from the validator.
+export const validated = createAnalytics({
+  providers: [{ provider: outputsProvider }],
+  validator: handWritten,
+  onValidationError: (error: ValidationError) => {
+    const issues: ReadonlyArray<ValidationIssue> = error.issues;
+    void issues;
+    void error.eventName;
+    void error.cause;
+  },
+});
+export const validatedType: AnalyticsInstance<Outputs, Inputs> = validated;
+
+// `track` takes the validator's input types.
+validated.track("order_completed", { orderId: "o-1", totalPrice: "500" });
+validated.track("order_completed", { orderId: "o-1", totalPrice: 500 });
+validated.track("user_signed_out");
+// @ts-expect-error input type does not allow a boolean
+validated.track("order_completed", { orderId: "o-1", totalPrice: true });
+// @ts-expect-error unknown event name
+validated.track("order_refunded", { orderId: "o-1" });
+
+// Providers receive the output types.
+export const outputProvider: AnalyticsProvider<Outputs> = {
+  name: "outputs",
+  track(event) {
+    if (event.name === "order_completed") {
+      const total: number = event.payload.totalPrice;
+      void total;
+    }
+  },
+};
+
+// Two type arguments require a validator.
+// @ts-expect-error a validator is required when input and output maps are both given
+createAnalytics<Outputs, Inputs>({ providers: [{ provider: outputsProvider }] });
+
+// A validator must cover every event of the configured maps.
+declare const partialValidator: EventValidator<Pick<Inputs, "order_completed">, Pick<Outputs, "order_completed">>;
+createAnalytics<Outputs, Inputs>({
+  providers: [{ provider: outputsProvider }],
+  // @ts-expect-error validator does not cover `user_signed_out`
+  validator: partialValidator,
+});
+
+// Without a validator, the single-argument form is unchanged.
+export const unvalidated: AnalyticsInstance<Outputs> = createAnalytics<Outputs>({ providers: [{ provider: outputsProvider }] });
+
+// --- Validation: the Zod adapter (`box-multi-tracker/zod`) ------------------------
+
+const schemas = {
+  order_completed: z.object({
+    orderId: z.string(),
+    totalPrice: z.union([z.number(), z.string().transform(Number)]),
+  }),
+  user_signed_out: z.undefined(),
+};
+
+export const zodValidator = createZodValidator(schemas);
+export const zodValidatorType: EventValidator<InferInputEvents<typeof schemas>, InferOutputEvents<typeof schemas>> = zodValidator;
+export const zodMatchesContract: EventValidator<Inputs, Outputs> = zodValidator;
+export type SchemaMap = ZodEventSchemas<typeof schemas>;
+
+export const withZod = createAnalytics({ providers: [{ provider: outputsProvider }], validator: zodValidator });
+withZod.track("order_completed", { orderId: "o-1", totalPrice: "500" });
+// @ts-expect-error input type does not allow a boolean
+withZod.track("order_completed", { orderId: "o-1", totalPrice: false });
+
+// @ts-expect-error a non-object payload schema is rejected
+createZodValidator({ page_viewed: z.string() });
+
+// The adapter is an entry point of its own; its internals are not reachable.
+// @ts-expect-error internal modules are not reachable (exports map)
+import type * as InternalZod from "box-multi-tracker/dist/zod/validator.js";

@@ -3,6 +3,7 @@ import { ProviderControls } from "../components/ProviderControls";
 import { CompleteOrder } from "../features/checkout/complete-order";
 import { Login } from "../features/auth/login";
 import { ProductDetails } from "../features/products/product-details";
+import { ValidationDemo } from "../features/validation/validation-demo";
 import { PlaygroundProvider } from "./providers/PlaygroundProvider";
 import { usePlayground } from "./providers/playground.context";
 
@@ -35,6 +36,7 @@ function Playground() {
           <Login />
           <ProductDetails />
           <CompleteOrder />
+          <ValidationDemo />
         </div>
 
         <div className="column">
