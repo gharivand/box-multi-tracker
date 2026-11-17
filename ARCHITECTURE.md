@@ -82,7 +82,14 @@ interface AnalyticsProvider<T extends EventMap<T> = DefaultEvents> {
 - **Readonly event and payload.** `name` and `payload` are `readonly`, and the payload is `Readonly<...>` (shallow). A provider that tries to assign to them fails to compile. This is a type-level guard only; see 5.4.
 - **`EventMap<T>` self-referential constraint.** This is the one non-obvious type trick. It lets plain `interface AppEvents` work, because interfaces do not satisfy `Record<string, ...>` index signatures. It is defined once and reused.
 - **`DefaultEvents = Record<string, object | undefined>`.** It allows untyped usage, and a provider written for "any event" is assignable to a typed `createAnalytics<AppEvents>(...)` configuration.
-- **Method syntax on the interface.** This keeps parameter bivariance-friendly assignability for generic providers.
+- **Method syntax on the interface.** `track(event: AnalyticsEvent<T>): void | Promise<void>` is deliberately declared as a method, not a function-typed property. This keeps compatibility with generic providers that use `DefaultEvents`. See the provider event map contract below.
+
+**Provider event map contract (accepted decision)**
+- **Every provider accepts the complete application event map.** A provider injected into `createAnalytics<AppEvents>` is typed to receive `AnalyticsEvent<AppEvents>`, either as `AnalyticsProvider<AppEvents>` or as a generic `AnalyticsProvider` (`DefaultEvents`).
+- **Core dispatches every event to every enabled provider.** It does not filter or route by provider capability, and there are no capability declarations, event filters or subscriptions.
+- **A provider may handle only a subset of events.** It is responsible for ignoring the events it doesn't need, typically with a `switch (event.name)` that has no case for them. Mapping and filtering stay inside the provider, consistent with "Core does not own vendor mapping".
+- **Method-parameter bivariance is accepted, not a feature.** Because `track` is a method, TypeScript checks its parameter bivariantly. As a result, a provider typed for a subset event map (for example `AnalyticsProvider<{ order_created: ... }>` where the app has more events) may also be assignable to `AnalyticsConfig<AppEvents>`. This is an acknowledged TypeScript behavior and is not a supported selective-subscription feature. Core still delivers all events to that provider, and it must tolerate those it doesn't recognize. Providers with disjoint event maps or conflicting payload types are still rejected.
+- **Alternative (rejected for now):** declaring `track` as a function-typed property gives strict parameter contravariance and rejects subset providers. It would also change how generic `DefaultEvents` providers are checked, so the method syntax is retained.
 
 ## 4. Public API
 
