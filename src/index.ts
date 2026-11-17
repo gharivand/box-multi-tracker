@@ -1,4 +1,5 @@
-// Public exports only. `createAnalytics` is exported once implemented.
+// Public exports only.
+export { createAnalytics } from "./analytics.js";
 export type {
   AnalyticsConfig,
   AnalyticsEvent,
