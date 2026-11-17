@@ -7,6 +7,7 @@ A small, framework-agnostic TypeScript library for sending one analytics event t
 - **Failure isolation.** A provider that throws or rejects never stops other providers and never throws into your application.
 - **Optional runtime validation.** Plug in a validator to check, and transform, payloads before any provider sees them. A [Zod adapter](#the-zod-adapter) is included as a separate, optional entry point.
 - **Optional Sentry reporting.** A small [Sentry adapter](#the-sentry-adapter) reports SDK failures (never payloads) through the existing error callbacks, as a separate, optional entry point.
+- **Optional debug logger.** A tiny [debug logger](#the-debug-logger) prints SDK errors to the console during development, as a separate, optional entry point.
 - **Zero runtime dependencies**, ESM-only, no browser or Node APIs.
 
 ## Contents
@@ -25,6 +26,7 @@ A small, framework-agnostic TypeScript library for sending one analytics event t
 - [Runtime validation](#runtime-validation)
 - [The Zod adapter](#the-zod-adapter)
 - [The Sentry adapter](#the-sentry-adapter)
+- [The debug logger](#the-debug-logger)
 - [API reference](#api-reference)
 - [Out of scope](#out-of-scope)
 - [Development](#development)
@@ -580,6 +582,79 @@ A validator exception is recognized by the **presence** of the `cause` property 
 - Importing `box-multi-tracker/sentry` without `@sentry/browser` installed fails when the module loads. Core and the Zod adapter are unaffected.
 - The adapter is tested against `@sentry/browser` 11.13; other 11.x versions are expected to work but are not verified.
 
+## The debug logger
+
+`box-multi-tracker/debug` prints the SDK's errors to the console while you develop. It is a separate entry point with no dependencies; Core never imports it. Like the Sentry adapter, it adds nothing to Core: it is a pair of handlers for the callbacks that already exist.
+
+```ts
+import { createAnalytics } from "box-multi-tracker";
+import { createDebugLogger } from "box-multi-tracker/debug";
+
+const logger = createDebugLogger({
+  enabled: import.meta.env.DEV, // default: false
+  level: "debug", // "error" | "warn" | "debug"; default: "debug"
+});
+
+const analytics = createAnalytics<AppEvents>({
+  providers: [...],
+  onError: logger.onProviderError,
+  onValidationError: logger.onValidationError,
+});
+```
+
+To combine it with another reporter such as the [Sentry adapter](#the-sentry-adapter), call both from your callbacks. Both handlers never throw:
+
+```ts
+onError: (error) => {
+  logger.onProviderError(error);
+  sentry.onProviderError(error);
+},
+```
+
+### What is logged
+
+| Situation | Console method |
+| --- | --- |
+| A provider throws or rejects | `console.error` |
+| A validator throws (`ValidationError` with a `cause` property) | `console.error` |
+| A payload fails validation (an ordinary invalid payload) | `console.warn` |
+
+Only failures are logged: not successful dispatches, and not provider state changes.
+
+Every line starts with `[box-multi-tracker]`, for example:
+
+```text
+[box-multi-tracker] Provider "flaky-service" failed while tracking "order_completed": Error: connection refused
+[box-multi-tracker] Validator threw while validating "product_viewed": Error: schema crashed
+[box-multi-tracker] Validation failed for "order_completed" (2 issues)
+```
+
+`level` decides how much is written:
+
+| `level` | Writes |
+| --- | --- |
+| `"error"` | Provider errors and validator exceptions only |
+| `"warn"` | The above, plus ordinary validation failures |
+| `"debug"` (default) | The above, each followed by a `console.debug` line with structured details |
+
+The `console.debug` details are `{ providerName, eventName, error }` for a provider error, `{ eventName, issues, validatorException }` for a validation failure, and the same plus `cause` for a validator exception. They hold the original error object, so the browser console shows its stack.
+
+A validator exception is recognized by the **presence** of the `cause` property on `ValidationError`, not by its value (a validator can throw `undefined`).
+
+### Guarantees
+
+- **Disabled by default.** A disabled logger returns immediately and writes nothing.
+- **It never interferes with tracking.** The handlers never throw and never return a promise. A console method that throws is swallowed, and the failure is not logged again.
+- **No payloads.** The handlers only receive `ProviderError` and `ValidationError`, which carry no payload, so the tracked payload and the event object cannot be logged.
+- **Read-only.** The error objects it receives are never modified.
+
+### Limitations
+
+- It is meant for development. Pass `enabled: false` (or a build-time flag such as `import.meta.env.DEV`) in production; the code stays in your bundle, but writes nothing.
+- Error messages are printed as written. They come from your providers and validators, so do not put payload data in them. A thrown value that is not an `Error` is described as such and not printed in the message line; it appears only in the `console.debug` details, which are written at level `"debug"`.
+- Validation issue text is printed in the `console.debug` details. It is written by your validator.
+- The logger writes to the global `console` at the time of each call. It has no custom sinks, formatting options or instance labels.
+
 ## API reference
 
 ```ts
@@ -674,9 +749,27 @@ interface SentryReporter {
 
 Exported value: `createSentryReporter`. Exported types: `SentryReporter`, `SentryReporterOptions`.
 
+**`box-multi-tracker/debug`** (optional; no dependencies):
+
+```ts
+function createDebugLogger(options?: DebugLoggerOptions): DebugLogger;
+
+interface DebugLoggerOptions {
+  enabled?: boolean; // default: false
+  level?: "error" | "warn" | "debug"; // default: "debug"
+}
+
+interface DebugLogger {
+  onProviderError(error: ProviderError): void;
+  onValidationError(error: ValidationError): void;
+}
+```
+
+Exported value: `createDebugLogger`. Exported types: `DebugLogger`, `DebugLoggerOptions`, `DebugLogLevel`.
+
 ## Out of scope
 
-This library intentionally does only what is described above. It has no `identify`, `reset`, `init`, `flush` or `shutdown` APIs, and no buffering, retries, batching, persistence or per-provider event filtering or routing. Validation (see [Runtime validation](#runtime-validation)) is optional and applies to an event as a whole: it can reject an event for every provider or transform it for every provider, never for just some. Vendor integrations are written by the consuming application; the only one included is the optional [Sentry adapter](#the-sentry-adapter), which reports SDK failures and nothing else.
+This library intentionally does only what is described above. It has no `identify`, `reset`, `init`, `flush` or `shutdown` APIs, and no buffering, retries, batching, persistence or per-provider event filtering or routing. Validation (see [Runtime validation](#runtime-validation)) is optional and applies to an event as a whole: it can reject an event for every provider or transform it for every provider, never for just some. Vendor integrations are written by the consuming application; the only ones included are the optional [Sentry adapter](#the-sentry-adapter), which reports SDK failures and nothing else, and the optional [debug logger](#the-debug-logger), which prints them.
 
 ## Development
 

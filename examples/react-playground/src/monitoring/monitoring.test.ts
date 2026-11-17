@@ -19,7 +19,7 @@ function createInstance(instanceId: string): AppAnalytics {
     instanceId,
     label: `Instance ${instanceId}`,
     log: createDispatchLog(),
-    monitoring: createSentryReporter({ instanceId }),
+    monitoring: [createSentryReporter({ instanceId })],
     providers: [
       { kind: "console", enabled: true },
       { kind: "flaky-service", enabled: true },
@@ -135,7 +135,7 @@ describe("Sentry in the playground", () => {
       instanceId: "c",
       label: "Instance c",
       log,
-      monitoring: createSentryReporter({ instanceId: "c" }),
+      monitoring: [createSentryReporter({ instanceId: "c" })],
       providers: [
         { kind: "flaky-service", enabled: true },
         { kind: "console", enabled: true },

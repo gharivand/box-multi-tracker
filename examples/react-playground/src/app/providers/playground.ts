@@ -2,6 +2,7 @@ import { createAppAnalytics } from "../../analytics/analytics";
 import type { AppAnalytics } from "../../analytics/analytics";
 import { createDispatchLog } from "../../analytics/dispatch-log";
 import type { DispatchLog } from "../../analytics/dispatch-log";
+import { createAppDebugLogger } from "../../monitoring/debug-logger";
 import type { SentryCaptureLog } from "../../monitoring/sentry-capture-log";
 import { createSentryReporter } from "box-multi-tracker/sentry";
 
@@ -20,6 +21,8 @@ export interface Playground {
  */
 export function createPlayground(sentryLog: SentryCaptureLog): Playground {
   const log = createDispatchLog();
+  // One logger for both instances: it is stateless, and the event log tells them apart.
+  const debugLogger = createAppDebugLogger();
 
   return {
     log,
@@ -29,8 +32,8 @@ export function createPlayground(sentryLog: SentryCaptureLog): Playground {
         instanceId: "a",
         label: "Instance A",
         log,
-        // One reporter per instance, so Sentry events carry the right `instance` tag.
-        monitoring: createSentryReporter({ instanceId: "a" }),
+        // One Sentry reporter per instance, so Sentry events carry the right `instance` tag.
+        monitoring: [debugLogger, createSentryReporter({ instanceId: "a" })],
         providers: [
           { kind: "console", enabled: true },
           { kind: "flaky-service", enabled: true },
@@ -41,7 +44,7 @@ export function createPlayground(sentryLog: SentryCaptureLog): Playground {
         instanceId: "b",
         label: "Instance B",
         log,
-        monitoring: createSentryReporter({ instanceId: "b" }),
+        monitoring: [debugLogger, createSentryReporter({ instanceId: "b" })],
         providers: [
           { kind: "mock-analytics", enabled: true },
           { kind: "console", enabled: false },

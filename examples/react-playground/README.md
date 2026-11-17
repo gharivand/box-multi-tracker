@@ -11,6 +11,7 @@ A realistic frontend consumer of `box-multi-tracker`, built with Vite, React and
 - Unknown provider behavior (`enableProvider("does-not-exist")` throws, `isProviderEnabled` returns `false`).
 - A live event log: event, payload, global order, each provider in invocation order with its outcome, skipped (disabled) providers, and dropped events.
 - **Runtime validation with the Zod adapter** (`box-multi-tracker/zod`): every event is validated before any provider sees it. See [Validation](#validation).
+- **Debug logging** (`box-multi-tracker/debug`): in development, SDK errors are printed to the browser console. See [Debug logger](#debug-logger).
 - **Sentry reporting** (`box-multi-tracker/sentry`): provider errors and validator exceptions are reported, ordinary validation failures and payloads are not. See [Sentry](#sentry).
 
 ## Validation
@@ -40,6 +41,20 @@ How it is wired:
 - `features/validation/validation-demo/` is the feature that triggers the scenarios, through the same `Tracking` abstraction as every other feature.
 
 The example installs `zod` as its own dependency. The SDK does not install it.
+
+## Debug logger
+
+`src/monitoring/debug-logger.ts` creates the logger with `createDebugLogger({ enabled: import.meta.env.DEV, level: "debug" })`: enabled by `npm run dev` and in tests, **disabled in a production build** (Vite replaces `import.meta.env.DEV` with `false`, so the logger is created disabled and writes nothing). `app/providers/playground.ts`, the composition root, creates it once and passes it, together with a Sentry reporter, in the `monitoring` list of each instance. `analytics.ts` calls every reporter from `onError` and `onValidationError` after writing the event log entry, so the wiring exists once and knows neither adapter.
+
+Open the browser console and run a scenario of the **Sentry** card (or an *Invalid order* of the **Validation** card):
+
+| Scenario | Console | Sentry |
+| --- | --- | --- |
+| Provider error | `console.error`, then a `console.debug` details line | reported |
+| Validator exception | `console.error`, then a `console.debug` details line | reported |
+| Ordinary validation failure | `console.warn`, then a `console.debug` details line | **not reported** |
+
+The tracked payload never appears in the console output or in Sentry events.
 
 ## Sentry
 
@@ -90,7 +105,7 @@ src/
     observed-provider.ts     decorator recording provider calls for the log (demo only)
     dispatch-log.ts          framework-agnostic store behind the event log (demo only)
     validator-fault.ts       makes the validator crash on demand (test double)
-  monitoring/                Sentry setup (dummy DSN, in-memory transport) and the capture log
+  monitoring/                debug logger setup, Sentry setup (dummy DSN, in-memory transport) and the capture log
   domain/catalog.ts          fake storefront data
   features/<area>/<feature>/ index.tsx (UI), <feature>.hook.ts (logic), <feature>.types.ts, plain services
   components/                ProviderControls, EventLog, SentryCaptures
@@ -102,4 +117,4 @@ type-checks/                 public-API type checks, run under NodeNext and Bund
 - Components render and forward interactions; feature hooks own state and orchestration; business logic lives in plain TypeScript services.
 - Features depend on the `Tracking` abstraction (narrowed per feature with `Pick`), never on the SDK or a provider.
 - The event is tracked only at the semantic point where it is true: after a successful login, after the product has loaded, after the order was created. Failures track nothing.
-- `type-checks/public-api.ts` is a self-contained consumer check (valid and invalid events and payloads, narrowing, the validator contract, `box-multi-tracker/zod`, `box-multi-tracker/sentry`, public type imports, inaccessible internals). It is separate from the app because NodeNext needs `.js` import extensions, which a Vite app does not use.
+- `type-checks/public-api.ts` is a self-contained consumer check (valid and invalid events and payloads, narrowing, the validator contract, `box-multi-tracker/zod`, `box-multi-tracker/sentry`, `box-multi-tracker/debug`, public type imports, inaccessible internals). It is separate from the app because NodeNext needs `.js` import extensions, which a Vite app does not use.

@@ -22,6 +22,8 @@ import type {
   ValidationIssue,
   ValidationResult,
 } from "box-multi-tracker";
+import { createDebugLogger } from "box-multi-tracker/debug";
+import type { DebugLogger, DebugLoggerOptions, DebugLogLevel } from "box-multi-tracker/debug";
 import { createSentryReporter } from "box-multi-tracker/sentry";
 import type { SentryReporter, SentryReporterOptions } from "box-multi-tracker/sentry";
 import { createZodValidator } from "box-multi-tracker/zod";
@@ -305,3 +307,36 @@ void fromCore;
 
 // @ts-expect-error internal modules are not reachable (exports map)
 import type * as InternalSentry from "box-multi-tracker/dist/sentry/reporter.js";
+
+// --- Development logging: the debug logger (`box-multi-tracker/debug`) ---------------
+
+export const debugOptions: DebugLoggerOptions = { enabled: true, level: "warn" };
+export const debugLevel: DebugLogLevel = "debug";
+export const debugLogger: DebugLogger = createDebugLogger(debugOptions);
+export const defaultDebugLogger: DebugLogger = createDebugLogger(); // disabled by default
+
+// Its handlers plug straight into the Core callbacks, with Core's own types.
+export const debugOnProviderError: (error: ProviderError) => void = debugLogger.onProviderError;
+export const debugOnValidationError: (error: ValidationError) => void = debugLogger.onValidationError;
+export const withDebugLogger = createAnalytics<Events>({
+  providers: [entry],
+  onError: debugLogger.onProviderError,
+  onValidationError: debugLogger.onValidationError,
+});
+
+// @ts-expect-error unknown level
+createDebugLogger({ level: "verbose" });
+// @ts-expect-error enabled must be a boolean
+createDebugLogger({ enabled: "yes" });
+// @ts-expect-error no other options exist
+createDebugLogger({ prefix: "x" });
+// @ts-expect-error the handlers are not interchangeable
+export const debugSwapped: (error: ValidationError) => void = debugLogger.onProviderError;
+
+// Core does not know about the logger.
+// @ts-expect-error not exported from the Core entry point
+import { createDebugLogger as debugFromCore } from "box-multi-tracker";
+void debugFromCore;
+
+// @ts-expect-error internal modules are not reachable (exports map)
+import type * as InternalDebug from "box-multi-tracker/dist/debug/logger.js";

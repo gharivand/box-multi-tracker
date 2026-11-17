@@ -29,7 +29,8 @@ export interface ProviderSetup {
 
 /**
  * Where an instance reports its failures besides the event log. Structurally the
- * handlers of `createSentryReporter`, but this layer does not know about Sentry.
+ * handlers of `createSentryReporter` and `createDebugLogger`, but this layer knows
+ * about neither.
  */
 export interface MonitoringHandlers {
   onProviderError(error: ProviderError): void;
@@ -41,8 +42,11 @@ export interface AppAnalyticsOptions {
   label: string;
   providers: readonly ProviderSetup[];
   log: DispatchLog;
-  /** Optional monitoring (for example the Sentry reporter), connected to the SDK's error callbacks. */
-  monitoring?: MonitoringHandlers;
+  /**
+   * Optional reporters (the debug logger, the Sentry reporter, ...), connected to the SDK's
+   * error callbacks and called in order. They never throw, so one cannot starve the next.
+   */
+  monitoring?: readonly MonitoringHandlers[];
 }
 
 /** Everything the playground needs from one configured analytics instance. */
@@ -67,7 +71,7 @@ export function createAppAnalytics(options: AppAnalyticsOptions): AppAnalytics {
   const { instanceId, label, log } = options;
   const failure = createFailureControl();
   const validatorFault = createValidatorFault();
-  const { monitoring } = options;
+  const monitoring = options.monitoring ?? [];
 
   const recorder = { start: (providerName: string, event: { name: string; payload: unknown }) =>
     log.recordDelivery(instanceId, providerName, event) };
@@ -93,14 +97,14 @@ export function createAppAnalytics(options: AppAnalyticsOptions): AppAnalytics {
     // Every event is validated, and possibly transformed, before any provider sees it.
     validator: withValidatorFault(appEventValidator, validatorFault),
     // Provider failures and validation failures arrive through separate callbacks.
-    // Each goes to the event log and, when configured, to monitoring.
+    // Each goes to the event log and then to every configured reporter.
     onError: (error) => {
       log.reportError(instanceId, error);
-      monitoring?.onProviderError(error);
+      for (const reporter of monitoring) reporter.onProviderError(error);
     },
     onValidationError: (error) => {
       log.reportValidationError(instanceId, error);
-      monitoring?.onValidationError(error);
+      for (const reporter of monitoring) reporter.onValidationError(error);
     },
   });
 

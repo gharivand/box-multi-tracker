@@ -47,7 +47,7 @@ export const SCENARIOS: readonly SentryScenario[] = [
     id: "ordinary-validation-failure",
     title: "Ordinary validation failure",
     description:
-      "An invalid order (empty orderId, itemsCount -1). Validation rejects it and onValidationError is called, but this is expected input, not a bug, so the adapter sends nothing to Sentry. The event log still shows it.",
+      "An invalid order (empty orderId, itemsCount -1). Validation rejects it and onValidationError is called, but this is expected input, not a bug, so the adapter sends nothing to Sentry. The event log still shows it, and the debug logger prints a warning in the browser console.",
     expectation: "not-reported",
     needsFlakyProvider: false,
     run: (context) => context.tracking.orderCompleted({ orderId: "", totalPrice: 10, itemsCount: -1 }),

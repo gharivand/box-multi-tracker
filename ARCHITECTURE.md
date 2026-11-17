@@ -1,6 +1,6 @@
 # box-multi-tracker: Architecture
 
-Status: implemented. Optional runtime validation (section 5.6) and the optional Sentry adapter (section 5.7) were added after the first implementation; neither changes Core's tracking or error handling.
+Status: implemented. Optional runtime validation (section 5.6), the optional Sentry adapter (section 5.7) and the optional debug logger (section 5.8) were added after the first implementation; none changes Core's tracking or error handling.
 Scope: Senior Frontend take-home. The goal is a small, clean, well-tested core with a type-safe API, not a production analytics platform.
 
 ## 1. Summary
@@ -189,6 +189,11 @@ analytics.isProviderEnabled("mixpanel"); // false
 - Value: `createSentryReporter`.
 - Types: `SentryReporter`, `SentryReporterOptions` (only Core types appear in them; no Sentry type is exposed).
 - Importing this entry point is the only place `@sentry/browser` is referenced, and it is a runtime import.
+
+**Exports from `box-multi-tracker/debug` (separate entry point, optional)**
+- Value: `createDebugLogger`.
+- Types: `DebugLogger`, `DebugLoggerOptions`, `DebugLogLevel`.
+- No dependencies; writes to the global `console`.
 
 **Improvements over the original conceptual example**
 - The event map is an explicit generic (`createAnalytics<AppEvents>`) because TypeScript cannot reliably infer it from providers.
@@ -402,6 +407,38 @@ createAnalytics({ providers, onError: sentry.onProviderError, onValidationError:
 - Validator failures are told apart by the `cause` property, so they depend on Core attaching it for exceptions only (current behavior, covered by tests).
 - Only `@sentry/browser` 11.13 was verified; the `^11.0.0` range is not.
 
+### 5.8 Debug logger (optional)
+
+`box-multi-tracker/debug` prints the SDK's errors to the console during development. Like the Sentry adapter it is a pair of handlers for the existing callbacks; Core is unchanged and does not import it.
+
+```ts
+const logger = createDebugLogger({ enabled: import.meta.env.DEV, level: "debug" });
+createAnalytics({ providers, onError: logger.onProviderError, onValidationError: logger.onValidationError });
+```
+
+- **Separate entry point, no dependency.** `exports["./debug"]`, same package, nothing to install. No Core file imports it, and no new Core callback, observer or option exists: it reuses `onError` and `onValidationError`.
+- **Functional factory, no state.** `createDebugLogger(options?)` reads `enabled` (default `false`, and only `true` enables) and `level` (default `"debug"`, any unknown value falls back to it) once, and returns two handlers. No class, no module-level state.
+- **Policy.**
+
+| Source | Method |
+| --- | --- |
+| Provider throws or rejects (`ProviderError`) | `console.error` |
+| Validator throws (`ValidationError` with a `cause` property) | `console.error` |
+| Payload fails validation (no `cause` property) | `console.warn` |
+
+- **Levels.** `"error"` lets errors through; `"warn"` adds warnings; `"debug"` adds one `console.debug` line after each logged failure, carrying structured details (`providerName`, `eventName`, `error`; or `eventName`, `issues`, `validatorException`, and `cause` for an exception). The message line stays short, and the details are not repeated in it.
+- **Same classification as the Sentry adapter:** `Object.hasOwn(error, "cause")`, so a validator that throws `undefined` is still an exception.
+- **Output.** `console[method]("[box-multi-tracker] ...")`, resolved at each call. Only failures are logged; successful dispatches and provider state changes are not.
+- **No payloads by construction.** The handlers receive `ProviderError` and `ValidationError`, which carry no payload or event. A thrown value that is not an `Error` is described as such in the message line and only appears in the level-`"debug"` details.
+- **Isolation.** The handlers never throw and never return a promise: argument reading, message building and each console call are inside `try/catch`, and each console call is guarded separately, so a failing `console.error` does not suppress the `console.debug` line. A failure of the logger is never logged. A disabled logger returns before reading its argument. The received objects are only read.
+- **`console` is declared locally.** Core compiles without DOM or Node typings, so `logger.ts` declares the three methods it uses in a module-scoped `declare const`. It is not exported or emitted.
+
+**Trade-offs.**
+- No instance label, custom sink or formatting: a shared logger cannot tell two analytics instances apart.
+- The logger is code in the bundle even when disabled. Tree-shaking cannot remove a call whose `enabled` flag is computed at run time.
+- Error messages and validation issue text are printed as written, so providers and validators must not put payload data in them.
+- A provider or validator that throws a non-`Error` value shows only a generic description in the message line.
+
 ## 6. Project structure
 
 ```
@@ -416,6 +453,9 @@ box-multi-tracker/
     sentry/
       index.ts      # entry point `box-multi-tracker/sentry` (re-exports only)
       reporter.ts   # createSentryReporter: the only file that imports @sentry/browser
+    debug/
+      index.ts      # entry point `box-multi-tracker/debug` (re-exports only)
+      logger.ts     # createDebugLogger: writes to the console, no dependencies
   test/
     analytics.test.ts       # runtime behavior
     types.test-d.ts         # compile-time behavior
@@ -426,6 +466,8 @@ box-multi-tracker/
     sentry.test.ts          # Sentry adapter against a mocked @sentry/browser
     sentry.integration.test.ts  # Sentry adapter against the real client with an in-memory transport
     sentry.test-d.ts        # Sentry adapter typing and public exports
+    debug.test.ts           # debug logger: levels, console methods, isolation, end to end
+    debug.test-d.ts         # debug logger typing and public exports
     helpers.ts              # recording / throwing / rejecting test providers
   ARCHITECTURE.md
   README.md             # usage, validation, and a sample custom provider snippet
@@ -435,7 +477,7 @@ box-multi-tracker/
 **Why this small:**
 - `types.ts` and `analytics.ts` separate the contract (what providers and apps import) from behavior.
 - Error isolation is about 15 lines. A separate file or `ErrorHandler` abstraction would be a layer without a reason, so it stays a small stateless helper inside `analytics.ts`.
-- `src/zod/` and `src/sentry/` are the only folders besides the top-level files. Each exists because the adapter is a separate public entry point; nothing outside it may import it, and nothing in it is imported by Core.
+- `src/zod/`, `src/sentry/` and `src/debug/` are the only folders besides the top-level files. Each exists because the adapter is a separate public entry point; nothing outside it may import it, and nothing in it is imported by Core.
 - There is no `utils/`, `core/`, `providers/`, `internal/`, or `testing/` folder.
 - Tooling: TypeScript, Vitest, `tsc` for the build, **ESM-only** output with an `exports` map and `types`.
 - The sample custom provider is a snippet in `README.md`. Test helpers contain their own small providers; there is no `examples/` folder.
@@ -502,6 +544,16 @@ Plus readonly checks: assigning to `event.name`, `event.payload`, or a top-level
 - Types: required `instanceId`, handler types equal Core's callback types, plug into `AnalyticsConfig`, and `createSentryReporter` is not exported from the Core entry point.
 - Mutation checks were run by hand (classifying by value instead of presence, dropping the try/catch, not observing the rejection, adding the payload to the context).
 
+**Debug logger tests (`debug.test.ts`, `debug.test-d.ts`).**
+- Console methods are spied on, never printed. Disabled by default (no options, `{}`, only a level), disabled explicitly at every level, anything but `true` is disabled, and a disabled logger does not read its argument.
+- Provider errors use `console.error` at every level; validator exceptions use `console.error`, recognized by the `cause` property for any thrown value (`undefined`, `null`, text, `0`, an object); ordinary failures use `console.warn` at `"warn"` and `"debug"` and are silent at `"error"`. Message text, prefix, singular and plural.
+- Levels: `"error"`, `"warn"` and `"debug"` call counts (including the `console.debug` details); the default level; an invalid level falls back to `"debug"`; loggers do not share state.
+- Details: provider error (same error object), failure (`validatorException: false`, no `cause`), exception (`cause`, including a present-but-`undefined` one).
+- Isolation: each console method throwing, one throwing method not suppressing the others, the failure not logged again, `undefined` returned and no unhandled rejection, malformed and hostile arguments, hostile `Error` getters, frozen inputs (a write would throw and leave the console empty).
+- End to end through `createAnalytics`: sync and async provider failures with other providers still delivering, an ordinary failure, a validator throwing an `Error` or `undefined`, nothing logged for a successful dispatch, a sentinel payload never logged, tracking unaffected by a broken console.
+- Types: optional options, `enabled` and `level` only, handler types equal Core's callback types, and the Core entry does not export the logger.
+- Mutation checks were run by hand (classifying by value, dropping the enabled guard or any `try/catch`, shifting the level thresholds, printing thrown values with `String`, truthy `enabled`, dropping `cause` from the details); every mutant was killed.
+
 **Validation type tests (`validation.test-d.ts`, `zod.test-d.ts`).**
 - Input and output types are inferred from the validator (`AnalyticsInstance<Outputs, Inputs>`), and from Zod schemas.
 - `track` accepts input types and rejects output-only values; unknown names and invalid payloads are errors.
@@ -552,3 +604,4 @@ Duplicate-name validation exists only because name-based control requires unique
 14. **Typing:** two event maps (`T` output, `TInput` input, defaulting to `T`); both inferred from the validator; validator overload first; no `any`, no casts to bypass the type system in Core.
 15. **Zod is an adapter, not a dependency:** `box-multi-tracker/zod` (`createZodValidator`), an optional peer dependency (`zod` `^4.0.0`), type-only import. `dependencies` stays empty.
 16. **Sentry is an adapter, not a dependency of Core:** `box-multi-tracker/sentry` (`createSentryReporter`), an optional peer dependency (`@sentry/browser` `^11.0.0`). It reuses `onError` and `onValidationError`, never initializes Sentry, reports provider errors and validator exceptions only, and never sends payloads.
+17. **The debug logger is an adapter, not part of Core:** `box-multi-tracker/debug` (`createDebugLogger`), no dependency. It reuses `onError` and `onValidationError`, is disabled by default, logs failures only (provider errors and validator exceptions with `console.error`, ordinary validation failures with `console.warn`), never logs payloads, and never interferes with tracking.
